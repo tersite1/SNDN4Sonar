@@ -1,0 +1,113 @@
+# ------------------------------------------------------------------------
+# General Settings
+# ------------------------------------------------------------------------
+name: train_srdn_sonar_x4  # 실험 이름 (원하는 대로 변경)
+model_type: sr4ir_det
+scale: 4                   # ★ 중요: SR 배율 (4배 추천, 너무 크면 학습 어려움)
+num_gpu: 4                 # 사용하시는 GPU 개수
+manual_seed: 100
+
+# ------------------------------------------------------------------------
+# Dataset Settings
+# ------------------------------------------------------------------------
+data:
+  path: /mnt/server16_hard1/LIGNEX1/yolo_data/combined/train/images # ★ 소나 패치 데이터 경로
+  format: custom           # 데이터 로더 포맷 (src/data/det.py에 맞춰야 함)
+  is_voc: false            # VOC 데이터셋 아님
+  
+  # 데이터 로더 설정 (필요시 src/data/det.py 수정 필요)
+  # 사용자님의 train_det_low.py에서 쓴 데이터셋 방식을 여기에 연결해야 함
+
+# ------------------------------------------------------------------------
+# Network Settings
+# ------------------------------------------------------------------------
+# [학생] SR/Denoise 모델
+network_sr:
+  name: swinir             # ★ 추천: SwinIR (성능 좋음) 또는 edsr
+  upscale: 4               # 위 scale과 맞춰야 함
+  in_chans: 3
+  img_size: 64             # 학습할 때 자를 패치 크기 (Input LR 기준)
+  window_size: 8
+  img_range: 1.0
+  depths: [6, 6, 6, 6, 6, 6]
+  embed_dim: 180
+  num_heads: [6, 6, 6, 6, 6, 6]
+  mlp_ratio: 2
+  upsampler: pixelshuffle
+  resi_connection: 1conv
+
+# [선생님] 기뢰 탐지 디텍터
+network_det:
+  name: SonarFasterRCNNDetector  # ★ 중요: 사용자님이 만든 클래스 이름
+  backbone_variant: large
+  num_classes: 2                 # 배경 + 기뢰 (총 2개 클래스)
+
+# ------------------------------------------------------------------------
+# Path Settings (가중치 연결)
+# ------------------------------------------------------------------------
+path:
+  # [학생 초기값] 인터넷에서 SwinIR x4 Pre-trained 모델 다운로드 후 경로 지정
+  # (없으면 주석 처리해도 되지만, 성능 위해 권장)
+  network_sr: ../saved_models/003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_GAN.pth
+  
+  # [선생님 초기값] ★ Step 1에서 학습시킨 디텍터 경로 (필수!)
+  network_det: runs_det_low_combined/model_epoch050.pth
+  
+  # 재개할 경우
+  # resume_state: experiments/train_srdn_sonar_x4/training_states/1000.state
+
+# ------------------------------------------------------------------------
+# Training Settings
+# ------------------------------------------------------------------------
+train:
+  batch_size: 32      # GPU 4개니까 32~64 추천
+  epoch: 50           # 충분히 학습
+  save_freq: 5        # 5 에포크마다 저장
+  
+  # Optimizer
+  optim_sr:
+    type: AdamW
+    lr: !!float 1e-4
+    weight_decay: 0
+    betas: [0.9, 0.999]
+    
+  optim_det:
+    type: SGD
+    lr: !!float 1e-3  # 이미 학습된 모델이므로 LR을 조금 낮춤
+    momentum: 0.9
+    weight_decay: !!float 1e-4
+
+  # Scheduler
+  scheduler_sr:
+    type: MultiStepLR
+    milestones: [25, 40]
+    gamma: 0.5
+  scheduler_det:
+    type: MultiStepLR
+    milestones: [25, 40]
+    gamma: 0.5
+
+  # ★ Phase 1 Loss (SR 학습용)
+  pixel_opt:
+    type: L1Loss
+    loss_weight: !!float 1.0  # 노이즈 제거 & 해상도 복원 기본 임무
+  
+  tdp_opt:
+    type: FeatureLoss         # ★ 핵심: 디텍터가 주는 피드백
+    loss_weight: !!float 1.0  # 이 값을 키우면 기뢰 모양을 더 중요하게 여김
+    criterion: l1
+    # 디텍터의 어떤 층(Layer)을 볼 것인가? (코드에 따라 이름 확인 필요)
+    # 보통 FPN을 쓰면 '0', '1', '2', '3' 등이 피처맵 이름임
+    layer_weights:
+      '0': 1.0  # 가장 큰 피처맵
+
+  # ★ Phase 2 Loss (디텍터 적응용)
+  det_sr_opt:
+    type: DETLoss
+    loss_weight: !!float 0.5
+  det_hr_opt:
+    type: DETLoss
+    loss_weight: !!float 0.5
+  det_cqmix_opt:
+    type: DETLoss
+    loss_weight: !!float 0.5

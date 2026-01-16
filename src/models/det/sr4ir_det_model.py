@@ -10,6 +10,23 @@ from utils.det import MetricLogger, SmoothedValue, get_coco_api_from_dataset, _g
 
 from .base_model import BaseModel
 
+def apply_sonar_noise(image, downsample=4, min_L=2.0, max_L=10.0):
+    # 1. 다운샘플링 (이미지 크기 줄이기)
+    downsample_image = interpolate(image, scale_factor=1/downsample, mode='bilinear', align_corners=False)
+    
+    # 2. 노이즈 파라미터 생성
+    dist = np.random.uniform(min_L, max_L)
+    dist = dist * (downsample**2)
+    gamma_dist = torch.distributions.Gamma(dist, dist)
+    
+    # 3. 노이즈 생성
+    noise = gamma_dist.sample(downsample_image.shape).to(device=image.device)
+    
+    # 4. 스펙클 노이즈 적용 (0~1 범위 가정: 단순히 곱하기)
+    # 소나 노이즈: Signal * Noise
+    noisy_image = (downsample_image * noise).clamp(0, 1)
+    
+    return noisy_image
 
 def make_model(opt):
     return SR4IRDetectionModel(opt)
@@ -49,17 +66,6 @@ class SR4IRDetectionModel(BaseModel):
 
 
     #sonar SR 에서 가져옴
-    def apply_sonar_noise(image, downsample=8, min_L=2.0, max_L=10.0):
-        dist = np.random.uniform(min_L, max_L)
-        dist = dist * (downsample**2)
-        gamma_dist = torch.distributions.Gamma(dist, dist)
-        downsample_image = torch.nn.functional.interpolate(image, scale_factor=1/downsample, mode='bilinear', align_corners=False)
-        noise = gamma_dist.sample(downsample_image.shape).to(device=image.device)
-
-        unnorm_img = (downsample_image + 1) / 2
-        noisy_image = (unnorm_img * noise).clamp(0, 1)
-        noisy_image = 2 * noisy_image - 1
-        return noisy_image, downsample_image, dist / (max_L * downsample ** 2)
 
         
     def init_training_settings(self, data_loader_train):
@@ -148,13 +154,12 @@ class SR4IRDetectionModel(BaseModel):
 
 
             # 노이즈랑 SR 동시 수행
-            noisy_lr, clean_lr_down, _ = apply_sonar_noise(
-            img_hr_batch,           # 원본 (정답)
-            downsample=self.scale,  # 배율 (예: 4배, 8배)
-            min_L=2.0, max_L=10.0
-            ) 
-            img_lr_batch = quantize(interpolate(img_hr_batch, scale_factor=(1/self.scale), mode='bicubic'))
-            
+            img_lr_batch = apply_sonar_noise(
+                img_hr_batch,           
+                downsample=self.scale,  
+                min_L=2.0, max_L=10.0
+            )
+
             # phase 1;
             # update net_sr, freeze net_cls
             img_sr_batch = self.net_sr(img_lr_batch)
