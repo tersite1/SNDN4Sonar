@@ -46,6 +46,21 @@ class SR4IRDetectionModel(BaseModel):
             self.net_det.eval()
         else:
             raise NotImplementedError(f"mode {mode} is not supported")
+
+
+    #sonar SR 에서 가져옴
+    def apply_sonar_noise(image, downsample=8, min_L=2.0, max_L=10.0):
+        dist = np.random.uniform(min_L, max_L)
+        dist = dist * (downsample**2)
+        gamma_dist = torch.distributions.Gamma(dist, dist)
+        downsample_image = torch.nn.functional.interpolate(image, scale_factor=1/downsample, mode='bilinear', align_corners=False)
+        noise = gamma_dist.sample(downsample_image.shape).to(device=image.device)
+
+        unnorm_img = (downsample_image + 1) / 2
+        noisy_image = (unnorm_img * noise).clamp(0, 1)
+        noisy_image = 2 * noisy_image - 1
+        return noisy_image, downsample_image, dist / (max_L * downsample ** 2)
+
         
     def init_training_settings(self, data_loader_train):
         self.set_mode(mode='train')
@@ -130,6 +145,14 @@ class SR4IRDetectionModel(BaseModel):
 
             # make on-the-fly LR image
             img_hr_batch = self.list_to_batch(img_hr_list)
+
+
+            # 노이즈랑 SR 동시 수행
+            noisy_lr, clean_lr_down, _ = apply_sonar_noise(
+            img_hr_batch,           # 원본 (정답)
+            downsample=self.scale,  # 배율 (예: 4배, 8배)
+            min_L=2.0, max_L=10.0
+            ) 
             img_lr_batch = quantize(interpolate(img_hr_batch, scale_factor=(1/self.scale), mode='bicubic'))
             
             # phase 1;
