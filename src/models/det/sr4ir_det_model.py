@@ -1,6 +1,7 @@
 import os
 import os.path as osp
 import torch
+import numpy as np
 
 from archs import build_network
 from losses import build_loss

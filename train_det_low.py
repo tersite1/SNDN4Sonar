@@ -125,7 +125,7 @@ class PatchDetDataset(Dataset):
                 continue
             if x2 <= x1 or y2 <= y1:
                 continue
-            cls = int(obj["class_id"]) + 1  # background=0, mine=1
+            cls = 1  # merge all mine types into a single foreground class
             if cls <= 0 or cls >= self.num_classes:
                 continue
             boxes.append([x1, y1, x2, y2])
