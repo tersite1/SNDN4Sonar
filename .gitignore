@@ -11,3 +11,5 @@ __pycache__/
 # files for experiments
 scripts
 rm_archives.sh
+
+runs_det_low
