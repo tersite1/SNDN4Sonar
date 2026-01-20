@@ -13,3 +13,5 @@ scripts
 rm_archives.sh
 
 runs_det_low
+experiments
+__pycache__

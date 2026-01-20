@@ -253,8 +253,11 @@ class SR4IRDetectionModel(BaseModel):
 
             # make on-the-fly LR image
             img_hr_batch = self.list_to_batch(img_hr_list)
-            img_lr_batch = quantize(interpolate(img_hr_batch, scale_factor=(1/self.scale), mode='bicubic'))
-            
+            img_lr_batch = apply_sonar_noise(
+            img_hr_batch,           
+            downsample=self.scale,  
+            min_L=2.0, max_L=10.0
+            )
             # perform SR
             img_sr_batch = self.net_sr(img_lr_batch)
             img_sr_list = self.batch_to_list(img_sr_batch, img_list=img_hr_list)

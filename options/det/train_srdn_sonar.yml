@@ -48,11 +48,9 @@ network_det:
 path:
   # [학생 초기값] 인터넷에서 SwinIR x4 Pre-trained 모델 다운로드 후 경로 지정
   # (없으면 주석 처리해도 되지만, 성능 위해 권장)
-  network_sr: ../saved_models/003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_GAN.pth
-  
+  network_sr: /mnt/server16_hard1/LIGNEX1/SR4IR/experiments/001_classicalSR_DIV2K_s48w8_SwinIR-M_x4.pth
   # [선생님 초기값] ★ Step 1에서 학습시킨 디텍터 경로 (필수!)
-  network_det: runs_det_low_combined/model_epoch050.pth
-  
+  network_det: /mnt/server16_hard1/LIGNEX1/SR4IR/runs_det_low/combined_dp/best.pth
   # 재개할 경우
   # resume_state: experiments/train_srdn_sonar_x4/training_states/1000.state
 
@@ -111,3 +109,8 @@ train:
   det_cqmix_opt:
     type: DETLoss
     loss_weight: !!float 0.5
+
+
+
+test:
+  calculate_lpips: false
