@@ -4,6 +4,8 @@ Code Reference: https://github.com/pytorch/vision/tree/main/references
 '''
 import datetime
 import time
+from pathlib import Path
+
 import torch
 
 from collections import defaultdict
@@ -70,8 +72,27 @@ class MetricLogger:
         for idx, obj in enumerate(iterable):
             data_time.update(time.time() - end)
             if return_filename:
-                image_id = iterable.dataset.ids[idx]
-                yield obj, iterable.dataset.coco.imgs[image_id]['file_name']
+                dataset = iterable.dataset
+                dataset_idx = idx
+                if isinstance(dataset, torch.utils.data.Subset):
+                    dataset_idx = dataset.indices[idx]
+                    dataset = dataset.dataset
+
+                filename = None
+                if hasattr(dataset, "ids") and hasattr(dataset, "coco"):
+                    image_id = dataset.ids[dataset_idx]
+                    filename = dataset.coco.imgs[image_id].get("file_name", str(image_id))
+                elif hasattr(dataset, "images"):
+                    filename = Path(dataset.images[dataset_idx]).name
+                elif hasattr(dataset, "img_paths"):
+                    filename = Path(dataset.img_paths[dataset_idx]).name
+                elif hasattr(dataset, "get_filename"):
+                    filename = dataset.get_filename(dataset_idx)
+
+                if filename is None:
+                    filename = str(dataset_idx)
+
+                yield obj, filename
             else:
                 yield obj
             iter_time.update(time.time() - end)

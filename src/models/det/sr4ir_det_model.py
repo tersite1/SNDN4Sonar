@@ -12,9 +12,11 @@ from utils.det import MetricLogger, SmoothedValue, get_coco_api_from_dataset, _g
 from .base_model import BaseModel
 
 def apply_sonar_noise(image, downsample=4, min_L=2.0, max_L=10.0):
-    # 1. 다운샘플링 (이미지 크기 줄이기)
-    downsample_image = interpolate(image, scale_factor=1/downsample, mode='bilinear', align_corners=False)
-    
+    # 1. 다운샘플링 (LR 입력 생성)
+    if downsample != 1:
+        downsample_image = interpolate(image, scale_factor=1 / downsample, mode='bilinear', align_corners=False)
+    else:
+        downsample_image = image
     # 2. 노이즈 파라미터 생성
     dist = np.random.uniform(min_L, max_L)
     dist = dist * (downsample**2)
@@ -67,6 +69,20 @@ class SR4IRDetectionModel(BaseModel):
 
 
     #sonar SR 에서 가져옴
+    def maybe_save_sr(self, img_sr_batch, filename=None, prob=0.01, suffix=None):
+        if prob <= 0:
+            return
+        if torch.rand(1).item() >= prob:
+            return
+        save_dir = osp.join(self.exp_dir, 'sr_samples')
+        os.makedirs(save_dir, exist_ok=True)
+        if img_sr_batch.dim() == 4:
+            img = img_sr_batch[0]
+        else:
+            img = img_sr_batch
+        if filename is None:
+            filename = 'sr_sample.png'
+        visualize_image(img, save_dir, filename, img_range=1.0, suffix=suffix)
 
         
     def init_training_settings(self, data_loader_train):
@@ -164,6 +180,9 @@ class SR4IRDetectionModel(BaseModel):
             # phase 1;
             # update net_sr, freeze net_cls
             img_sr_batch = self.net_sr(img_lr_batch)
+            save_prob = self.opt['train'].get('sr_save_prob', 0.01)
+            save_name = f"train_e{epoch:03d}_iter{current_iter:07d}.png"
+            self.maybe_save_sr(img_sr_batch, filename=save_name, prob=save_prob)
             img_sr_list = self.batch_to_list(img_sr_batch, img_list=img_hr_list)
             for p in self.net_det.parameters(): p.requires_grad = False
             self.optimizer_sr.zero_grad()
@@ -270,6 +289,8 @@ class SR4IRDetectionModel(BaseModel):
             # visualizing tool
             if self.opt['test'].get('visualize', False): # and (num_processed_samples < 20):
                 self.visualize(img_sr_list[0], outputs_sr[0], filename)
+            save_prob = self.opt['test'].get('sr_save_prob', 0.01)
+            self.maybe_save_sr(img_sr_batch, filename=filename, prob=save_prob, suffix='sr')
 
             # evaluation on validation batch
             batch_size = len(img_sr_list)

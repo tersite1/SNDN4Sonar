@@ -275,11 +275,25 @@ class BaseModel():
         if os.path.exists(load_path):
             net = self.get_bare_model(net)
             load_net = torch.load(load_path, map_location=lambda storage, loc: storage)
-            if param_key is not None:
-                if param_key not in load_net and 'params' in load_net:
-                    param_key = 'params'
-                load_net = load_net[param_key]
-            self.text_logger.write(f'--> Load {tag} model from {load_path}, with param key: [{param_key}].')
+            resolved_param_key = param_key
+            if isinstance(load_net, dict):
+                if resolved_param_key is not None:
+                    if resolved_param_key in load_net and isinstance(load_net[resolved_param_key], dict):
+                        load_net = load_net[resolved_param_key]
+                    elif 'params' in load_net and isinstance(load_net['params'], dict):
+                        resolved_param_key = 'params'
+                        load_net = load_net['params']
+                    elif 'params_ema' in load_net and isinstance(load_net['params_ema'], dict):
+                        resolved_param_key = 'params_ema'
+                        load_net = load_net['params_ema']
+                else:
+                    if 'params' in load_net and isinstance(load_net['params'], dict):
+                        resolved_param_key = 'params'
+                        load_net = load_net['params']
+                    elif 'params_ema' in load_net and isinstance(load_net['params_ema'], dict):
+                        resolved_param_key = 'params_ema'
+                        load_net = load_net['params_ema']
+            self.text_logger.write(f'--> Load {tag} model from {load_path}, with param key: [{resolved_param_key}].')
             # remove unnecessary 'module.'
             for k, v in deepcopy(load_net).items():
                 if k.startswith('module.'):

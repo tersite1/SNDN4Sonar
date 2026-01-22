@@ -6,6 +6,8 @@ model_type: sr4ir_det
 scale: 4                   # ★ 중요: SR 배율 (4배 추천, 너무 크면 학습 어려움)
 num_gpu: 4                 # 사용하시는 GPU 개수
 manual_seed: 100
+num_threads: 16
+print_freq: 100  # unit: iter
 
 # ------------------------------------------------------------------------
 # Dataset Settings
@@ -26,7 +28,7 @@ network_sr:
   name: swinir             # ★ 추천: SwinIR (성능 좋음) 또는 edsr
   upscale: 4               # 위 scale과 맞춰야 함
   in_chans: 3
-  img_size: 64             # 학습할 때 자를 패치 크기 (Input LR 기준)
+  img_size: 48             # 학습할 때 자를 패치 크기 (Input LR 기준)
   window_size: 8
   img_range: 1.0
   depths: [6, 6, 6, 6, 6, 6]
@@ -49,6 +51,7 @@ path:
   # [학생 초기값] 인터넷에서 SwinIR x4 Pre-trained 모델 다운로드 후 경로 지정
   # (없으면 주석 처리해도 되지만, 성능 위해 권장)
   network_sr: /mnt/server16_hard1/LIGNEX1/SR4IR/experiments/001_classicalSR_DIV2K_s48w8_SwinIR-M_x4.pth
+  network_sr_key: params
   # [선생님 초기값] ★ Step 1에서 학습시킨 디텍터 경로 (필수!)
   network_det: /mnt/server16_hard1/LIGNEX1/SR4IR/runs_det_low/combined_dp/best.pth
   # 재개할 경우
@@ -58,7 +61,7 @@ path:
 # Training Settings
 # ------------------------------------------------------------------------
 train:
-  batch_size: 32      # GPU 4개니까 32~64 추천
+  batch_size: 2      # GPU 4개니까 32~64 추천
   epoch: 50           # 충분히 학습
   save_freq: 5        # 5 에포크마다 저장
   
@@ -104,9 +107,6 @@ train:
     type: DETLoss
     loss_weight: !!float 0.5
   det_hr_opt:
-    type: DETLoss
-    loss_weight: !!float 0.5
-  det_cqmix_opt:
     type: DETLoss
     loss_weight: !!float 0.5
 
