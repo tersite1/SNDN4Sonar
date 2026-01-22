@@ -67,6 +67,12 @@ class SR4IRDetectionModel(BaseModel):
         else:
             raise NotImplementedError(f"mode {mode} is not supported")
 
+    def force_grayscale(self, img_batch):
+        if img_batch.dim() == 4 and img_batch.size(1) == 3:
+            gray = img_batch.mean(dim=1, keepdim=True)
+            return gray.repeat(1, 3, 1, 1)
+        return img_batch
+
 
     #sonar SR 에서 가져옴
     def maybe_save_sr(self, img_sr_batch, filename=None, prob=0.01, suffix=None):
@@ -180,6 +186,7 @@ class SR4IRDetectionModel(BaseModel):
             # phase 1;
             # update net_sr, freeze net_cls
             img_sr_batch = self.net_sr(img_lr_batch)
+            img_sr_batch = self.force_grayscale(img_sr_batch)
             save_prob = self.opt['train'].get('sr_save_prob', 0.01)
             save_name = f"train_e{epoch:03d}_iter{current_iter:07d}.png"
             self.maybe_save_sr(img_sr_batch, filename=save_name, prob=save_prob)
@@ -190,7 +197,7 @@ class SR4IRDetectionModel(BaseModel):
             if hasattr(self, 'cri_pix'):
                 l_pix = self.cri_pix(img_sr_batch, img_hr_batch)
                 metric_logger.meters["l_pix"].update(l_pix.item()) 
-                self.tb_logger.add_scalar('losses/l_pix', l_pix.item(), current_iter)
+                self.log_scalar('losses/l_pix', l_pix.item(), current_iter)
                 l_total_sr += l_pix
             if epoch > self.warmup_epoch:
                 if hasattr(self, 'cri_tdp'):
@@ -201,7 +208,7 @@ class SR4IRDetectionModel(BaseModel):
                     
                     l_tdp = self.cri_tdp(feat_sr['features'], feat_hr['features'])
                     metric_logger.meters["l_tdp"].update(l_tdp.item()) 
-                    self.tb_logger.add_scalar('losses/l_tdp', l_tdp.item(), current_iter)
+                    self.log_scalar('losses/l_tdp', l_tdp.item(), current_iter)
                     l_total_sr += l_tdp
             l_total_sr.backward()
             self.optimizer_sr.step()
@@ -209,21 +216,27 @@ class SR4IRDetectionModel(BaseModel):
             # phase 2;
             # update network det, freeze net_cls
             img_sr_batch = self.net_sr(img_lr_batch).detach()
+            img_sr_batch = self.force_grayscale(img_sr_batch)
             img_sr_list = self.batch_to_list(img_sr_batch, img_list=img_hr_list)
             for p in self.net_det.parameters(): p.requires_grad = True
             self.optimizer_det.zero_grad()
             l_total_det = 0
+            loss_clip = self.opt['train'].get('det_loss_clip', None)
             if hasattr(self, 'cri_det_sr'):
                 _, loss_dict_sr = self.net_det(img_sr_list, target_list)
                 l_det_sr = self.cri_det_sr(loss_dict_sr)
+                if loss_clip and loss_clip > 0:
+                    l_det_sr = torch.clamp(l_det_sr, max=loss_clip)
                 metric_logger.meters["l_det_sr"].update(l_det_sr.item())
-                self.tb_logger.add_scalar('losses/l_det_sr', l_det_sr.item(), current_iter)
+                self.log_scalar('losses/l_det_sr', l_det_sr.item(), current_iter)
                 l_total_det += l_det_sr
             if hasattr(self, 'cri_det_hr'):
                 _, loss_dict_hr = self.net_det(img_hr_list, target_list)
                 l_det_hr = self.cri_det_hr(loss_dict_hr)
+                if loss_clip and loss_clip > 0:
+                    l_det_hr = torch.clamp(l_det_hr, max=loss_clip)
                 metric_logger.meters["l_det_hr"].update(l_det_hr.item())
-                self.tb_logger.add_scalar('losses/l_det_hr', l_det_hr.item(), current_iter)
+                self.log_scalar('losses/l_det_hr', l_det_hr.item(), current_iter)
                 l_total_det += l_det_hr
             if hasattr(self, 'cri_det_cqmix'):
                 batch_size = len(img_hr_list)
@@ -232,10 +245,15 @@ class SR4IRDetectionModel(BaseModel):
                 img_cqmix_list = self.batch_to_list(img_cqmix_batch, img_list=img_hr_list)
                 _, loss_dict_cqmix = self.net_det(img_cqmix_list, target_list)
                 l_det_cqmix = self.cri_det_hr(loss_dict_cqmix)
+                if loss_clip and loss_clip > 0:
+                    l_det_cqmix = torch.clamp(l_det_cqmix, max=loss_clip)
                 metric_logger.meters["l_det_cqmix"].update(l_det_cqmix.item())
-                self.tb_logger.add_scalar('losses/l_det_cqmix', l_det_cqmix.item(), current_iter)
+                self.log_scalar('losses/l_det_cqmix', l_det_cqmix.item(), current_iter)
                 l_total_det += l_det_cqmix
             l_total_det.backward()
+            max_norm = self.opt['train'].get('det_grad_clip', 1.0)
+            if max_norm and max_norm > 0:
+                torch.nn.utils.clip_grad_norm_(self.net_det.parameters(), max_norm)
             self.optimizer_det.step()
             
             # psnr, lr
@@ -279,6 +297,7 @@ class SR4IRDetectionModel(BaseModel):
             )
             # perform SR
             img_sr_batch = self.net_sr(img_lr_batch)
+            img_sr_batch = self.force_grayscale(img_sr_batch)
             img_sr_list = self.batch_to_list(img_sr_batch, img_list=img_hr_list)
             
             # object detection

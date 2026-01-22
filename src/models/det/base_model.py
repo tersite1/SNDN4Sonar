@@ -6,6 +6,7 @@ import os.path as osp
 import sys
 import torch
 import torchvision
+import yaml
 
 from collections import OrderedDict
 from copy import deepcopy
@@ -14,7 +15,15 @@ from ptflops import get_model_complexity_info
 from torch.nn.functional import pad
 from torch.nn.parallel import DataParallel, DistributedDataParallel
 from torch.optim import lr_scheduler
-from utils.common import mkdir_and_rename, TensorboardLogger, TextLogger, ManualNormalize, MultiStepRestartLR, CosineAnnealingRestartLR
+from utils.common import (
+    mkdir_and_rename,
+    TensorboardLogger,
+    TextLogger,
+    ManualNormalize,
+    MultiStepRestartLR,
+    CosineAnnealingRestartLR,
+    is_main_process,
+)
 
 
 def make_model(opt):
@@ -61,6 +70,95 @@ class BaseModel():
         # for lpips calculation
         if opt['test'].get('calculate_lpips', False):
             self.net_lpips = lpips.LPIPS(net='vgg').to(self.device)
+
+        self.wandb_run = None
+        self.wandb_enabled = False
+        self._init_wandb()
+
+    def _load_wandb_config(self):
+        wandb_opt = self.opt.get('wandb', {}) or {}
+        if wandb_opt:
+            return wandb_opt
+
+        candidates = []
+        cfg_path = self.opt.get('wandb_config')
+        if cfg_path:
+            candidates.append(cfg_path)
+        cwd = os.getcwd()
+        candidates.append(osp.join(cwd, 'config.yaml'))
+        candidates.append(osp.join(cwd, os.pardir, 'config.yaml'))
+
+        for path in candidates:
+            if not path or not osp.isfile(path):
+                continue
+            try:
+                with open(path, 'r') as f:
+                    cfg = yaml.safe_load(f) or {}
+                if isinstance(cfg, dict) and cfg.get('wandb'):
+                    return cfg.get('wandb') or {}
+            except Exception as exc:
+                self.text_logger.write(f'W&B config load failed ({path}): {exc}')
+        return {}
+
+    def _init_wandb(self):
+        if not is_main_process():
+            return
+        wandb_opt = self._load_wandb_config()
+        if not wandb_opt or wandb_opt.get('disabled', False):
+            return
+        api_key = wandb_opt.get('api_key') or os.environ.get('WANDB_API_KEY')
+        if api_key:
+            os.environ['WANDB_API_KEY'] = api_key
+        else:
+            self.text_logger.write('W&B api_key not provided; skipping W&B init.')
+            return
+        mode = wandb_opt.get('mode')
+        if mode:
+            os.environ['WANDB_MODE'] = str(mode)
+        try:
+            import wandb
+        except Exception as exc:
+            self.text_logger.write(f'W&B import failed: {exc}')
+            return
+
+        project = wandb_opt.get('project', 'SR4IR')
+        entity = wandb_opt.get('entity')
+        group = wandb_opt.get('group')
+        run_name = wandb_opt.get('run_name', self.opt.get('name'))
+        save_dir = wandb_opt.get('dir', self.exp_dir)
+
+        self.wandb_run = wandb.init(
+            project=project,
+            entity=entity,
+            name=run_name,
+            group=group,
+            dir=save_dir,
+            config=self.opt,
+        )
+        self.wandb_enabled = self.wandb_run is not None
+
+    def wandb_log(self, metrics, step=None):
+        if not self.wandb_enabled:
+            return
+        try:
+            import wandb
+            wandb.log(metrics, step=step)
+        except Exception:
+            pass
+
+    def wandb_finish(self):
+        if not self.wandb_enabled:
+            return
+        try:
+            import wandb
+            wandb.finish()
+        except Exception:
+            pass
+
+    def log_scalar(self, name, value, current_iter):
+        if self.is_train and hasattr(self, 'tb_logger'):
+            self.tb_logger.add_scalar(name, value, current_iter)
+        self.wandb_log({name: value}, step=current_iter)
 
     def save(self, epoch, current_iter):
         """Save networks and training state."""
@@ -180,6 +278,7 @@ class BaseModel():
         metric_summary += f" {name} {value:.3f}"
         if self.is_train:
             self.tb_logger.add_scalar('metrics/{}'.format(name.lower()), value, epoch)
+        self.wandb_log({f'metrics/{name.lower()}': value}, step=epoch)
         return metric_summary
 
     def _set_lr(self, lr_groups_l):

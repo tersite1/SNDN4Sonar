@@ -48,6 +48,8 @@ def main():
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         model.text_logger.write(f"Training time {total_time_str}")
+        if hasattr(model, 'wandb_finish'):
+            model.wandb_finish()
 
     else:
         # We disable the cudnn benchmarking because it can noticeably affect the accuracy
@@ -58,6 +60,8 @@ def main():
             model.calculate_cost()
         else:
             model.evaluate(data_loader_test, test_sampler)
+        if hasattr(model, 'wandb_finish'):
+            model.wandb_finish()
 
 
 if __name__ == "__main__":

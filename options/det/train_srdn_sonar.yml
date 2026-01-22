@@ -8,6 +8,7 @@ num_gpu: 4                 # 사용하시는 GPU 개수
 manual_seed: 100
 num_threads: 16
 print_freq: 100  # unit: iter
+dist_url: env://
 
 # ------------------------------------------------------------------------
 # Dataset Settings
@@ -109,6 +110,7 @@ train:
   det_hr_opt:
     type: DETLoss
     loss_weight: !!float 0.5
+  det_loss_clip: 1.0
 
 
 
