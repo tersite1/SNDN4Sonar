@@ -142,10 +142,13 @@ class SonarFasterRCNNDetector(nn.Module):
     ):
         """
         Args:
-            images: List[[C,H,W]], float32, 0~1 (C=3 권장; 너 데이터는 RGB 복제라 C=3 OK)
+            images: List[[C,H,W]], float32, 0~1 (C=1 or 3; 1채널이면 내부에서 3채널로 변환)
             targets: 학습 시 GT dict 리스트
             return_feats: True면 feat_dict도 반환
         """
+        # Convert 1-channel to 3-channel (MobileNetV3 expects 3-channel RGB)
+        images = [img.repeat(3, 1, 1) if img.size(0) == 1 else img for img in images]
+
         original_image_sizes = [img.shape[-2:] for img in images]
         images_list: ImageList
         images_list, targets = self.detector.transform(images, targets)

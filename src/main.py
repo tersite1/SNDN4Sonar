@@ -36,10 +36,16 @@ def main():
             start_epoch, end_epoch = resume_epoch+1, opt['train']['epoch']
         else:
             start_epoch, end_epoch = 1, opt['train']['epoch']
-        
+
+        # Evaluate detector baseline BEFORE training (epoch 0)
+        model.text_logger.write("="*80)
+        model.text_logger.write("Evaluating detector baseline (epoch 0) BEFORE SR4IR training...")
+        model.text_logger.write("="*80)
+        model.evaluate(data_loader_test, epoch=0)
+
         model.text_logger.write("Start training")
         start_time = time.time()
-        
+
         for epoch in range(start_epoch, end_epoch+1):
             model.train_one_epoch(data_loader_train, train_sampler, epoch)
             model.evaluate(data_loader_test, epoch)

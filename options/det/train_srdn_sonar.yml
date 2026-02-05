@@ -1,14 +1,15 @@
 # ------------------------------------------------------------------------
 # General Settings
 # ------------------------------------------------------------------------
-name: train_srdn_sonar_x4  # 실험 이름 (원하는 대로 변경)
+name: train_sonarsr_det_x8  # 실험 이름 (SonarSR 사용, scale x8 원래대로)
 model_type: sr4ir_det
-scale: 4                   # ★ 중요: SR 배율 (4배 추천, 너무 크면 학습 어려움)
-num_gpu: 4                 # 사용하시는 GPU 개수
+scale: 8                    # ★ SonarSR 원본 가중치와 동일 (8배)
+num_gpu: 2                  # A6000 2대 사용
 manual_seed: 100
 num_threads: 16
 print_freq: 100  # unit: iter
 dist_url: env://
+find_unused_parameters: true  # DDP에서 BatchNorm 파라미터 허용
 
 # ------------------------------------------------------------------------
 # Dataset Settings
@@ -17,7 +18,10 @@ data:
   path: /mnt/server16_hard1/LIGNEX1/yolo_data/combined/train/images # ★ 소나 패치 데이터 경로
   format: custom           # 데이터 로더 포맷 (src/data/det.py에 맞춰야 함)
   is_voc: false            # VOC 데이터셋 아님
-  
+  crop_size: 640           # ★ 디텍터 입력 크기와 일치 (640 → LR: 80x80, scale=8)
+  yolo_normalized: true    # YOLO 정규화 좌표 (cx, cy, w, h in 0~1)
+  merge_classes: false     # ★ 3-class: Class 0→1 (cylinder), Class 1→2 (manta)
+  label_offset: 1          # Class ID에 1을 더함 (background=0이므로)
   # 데이터 로더 설정 (필요시 src/data/det.py 수정 필요)
   # 사용자님의 train_det_low.py에서 쓴 데이터셋 방식을 여기에 연결해야 함
 
@@ -26,35 +30,29 @@ data:
 # ------------------------------------------------------------------------
 # [학생] SR/Denoise 모델
 network_sr:
-  name: swinir             # ★ 추천: SwinIR (성능 좋음) 또는 edsr
-  upscale: 4               # 위 scale과 맞춰야 함
-  in_chans: 3
-  img_size: 48             # 학습할 때 자를 패치 크기 (Input LR 기준)
-  window_size: 8
-  img_range: 1.0
-  depths: [6, 6, 6, 6, 6, 6]
-  embed_dim: 180
-  num_heads: [6, 6, 6, 6, 6, 6]
-  mlp_ratio: 2
-  upsampler: pixelshuffle
-  resi_connection: 1conv
+  name: sonarsr            # ★ Original SonarSR architecture
+  scale: 8                 # ★ FIXED: 원본은 8배만 지원
+  in_channels: 1           # ★ Grayscale (Pretrained와 동일)
+  base_channels: 64        # Pretrained weight와 동일하게 유지
+  num_residual_blocks: 8   # 원본과 동일
+  # NOTE: 나머지 파라미터는 원본 구조에서 고정됨 (attention=True, bilinear upsample)
 
 # [선생님] 기뢰 탐지 디텍터
 network_det:
   name: SonarFasterRCNNDetector  # ★ 중요: 사용자님이 만든 클래스 이름
   backbone_variant: large
-  num_classes: 2                 # 배경 + 기뢰 (총 2개 클래스)
+  num_classes: 3                 # 배경 + cylinder + manta (총 3개 클래스)
 
 # ------------------------------------------------------------------------
 # Path Settings (가중치 연결)
 # ------------------------------------------------------------------------
 path:
-  # [학생 초기값] 인터넷에서 SwinIR x4 Pre-trained 모델 다운로드 후 경로 지정
-  # (없으면 주석 처리해도 되지만, 성능 위해 권장)
-  network_sr: /mnt/server16_hard1/LIGNEX1/SR4IR/experiments/001_classicalSR_DIV2K_s48w8_SwinIR-M_x4.pth
-  network_sr_key: params
-  # [선생님 초기값] ★ Step 1에서 학습시킨 디텍터 경로 (필수!)
-  network_det: /mnt/server16_hard1/LIGNEX1/SR4IR/runs_det_low/combined_dp/best.pth
+  # [학생 초기값] SonarSR Pre-trained 모델 (kangwook) - scale=8 원본
+  network_sr: /mnt/server16_hard0/kangwook/LIGNex1/SonarSR/checkpoints/sr_arch_pixelshuffle_globalo_v2/model_step_100000.pth
+  network_sr_key: null  # SonarSR 체크포인트의 키 구조에 맞게 조정 (필요시 'model' or 'state_dict')
+  strict_load: false    # 일부 키 불일치 무시
+  # [선생님 초기값] ★ 640×640 TRUE 1-channel grayscale 디텍터 경로 (train_det_gray1ch.py로 학습)
+  network_det: /mnt/server16_hard1/LIGNEX1/SR4IR/runs_det_gray1ch/combined_1ch/best_map.pth
   # 재개할 경우
   # resume_state: experiments/train_srdn_sonar_x4/training_states/1000.state
 
@@ -62,57 +60,82 @@ path:
 # Training Settings
 # ------------------------------------------------------------------------
 train:
-  batch_size: 2      # GPU 4개니까 32~64 추천
+  batch_size: 2       # 2 GPUs -> per-GPU 1 (A6000 메모리 안전)
   epoch: 50           # 충분히 학습
   save_freq: 5        # 5 에포크마다 저장
+  sr_save_prob: 0.001 # SR 샘플 이미지 저장 확률 (0.1% = 1000장당 1장)
+  warmup_epoch: 5     # 처음 5 epoch은 SR만 학습 (아티팩트 감소)
+  eval_freq: 1        # 매 에포크마다 검증
   
   # Optimizer
   optim_sr:
     type: AdamW
-    lr: !!float 1e-4
+    lr: !!float 5e-5  # 학습률 낮춤 (아티팩트 감소, pretrained 모델 유지)
     weight_decay: 0
     betas: [0.9, 0.999]
-    
+
   optim_det:
     type: SGD
-    lr: !!float 1e-3  # 이미 학습된 모델이므로 LR을 조금 낮춤
+    lr: !!float 1e-2  # 학습률 낮춤 (안정성)
     momentum: 0.9
     weight_decay: !!float 1e-4
 
   # Scheduler
   scheduler_sr:
-    type: MultiStepLR
-    milestones: [25, 40]
-    gamma: 0.5
+    type: CosineAnnealingLR
+    T_max: 50
+    eta_min: 0
   scheduler_det:
-    type: MultiStepLR
-    milestones: [25, 40]
-    gamma: 0.5
+    type: CosineAnnealingLR
+    T_max: 50
+    eta_min: 0
 
   # ★ Phase 1 Loss (SR 학습용)
   pixel_opt:
     type: L1Loss
-    loss_weight: !!float 1.0  # 노이즈 제거 & 해상도 복원 기본 임무
-  
+    loss_weight: !!float 1.0  # SwinIR과 유사하게 (균형)
+
+  # SonarSR denoised LR에 대한 pixel loss (중간 supervision)
+  pixel_dn_opt:
+    type: L1Loss
+    loss_weight: !!float 0.5  # Denoised LR supervision (보조적)
+
   tdp_opt:
-    type: FeatureLoss         # ★ 핵심: 디텍터가 주는 피드백
-    loss_weight: !!float 1.0  # 이 값을 키우면 기뢰 모양을 더 중요하게 여김
+    type: FeatureLoss         # ★ 핵심: 디텍터가 주는 피드백 (SR 출력)
+    loss_weight: !!float 1.0  # SwinIR과 유사하게 (task-driven)
     criterion: l1
     # 디텍터의 어떤 층(Layer)을 볼 것인가? (코드에 따라 이름 확인 필요)
     # 보통 FPN을 쓰면 '0', '1', '2', '3' 등이 피처맵 이름임
     layer_weights:
       '0': 1.0  # 가장 큰 피처맵
 
-  # ★ Phase 2 Loss (디텍터 적응용)
-  det_sr_opt:
-    type: DETLoss
-    loss_weight: !!float 0.5
+  # ★ Phase 2 Loss (디텍터 적응용) - SonarMix Strategy (3-Patch)
+  # SonarSR은 denoised LR도 출력하므로 더 많은 패치 전략 사용 가능
+  # CQMix 제거, 간단한 SonarMix만 사용 (메모리 절약)
+
   det_hr_opt:
     type: DETLoss
-    loss_weight: !!float 0.5
-  det_loss_clip: 1.0
+    loss_weight: !!float 0.2  # 원본 noisy 패치 (robustness)
+
+  det_dn_opt:
+    type: DETLoss
+    loss_weight: !!float 0.3  # Denoised LR 패치 (SonarSR 중간 출력)
+
+  det_sr_opt:
+    type: DETLoss
+    loss_weight: !!float 0.6  # SR 패치 (clean, high quality - 주력)
+
+  # det_dnsr_opt: ❌ SonarSR에서는 det_sr과 동일하므로 생략
+  # det_cqmix_opt: ❌ 메모리 절약 (나중에 추가 가능)
+
+  det_loss_clip: 0.3    # Gradient clipping (SwinIR과 유사)
+  det_grad_clip: 0.8    # Gradient clipping (SwinIR과 유사)
+  learnable_noise: true
+  noise_min_L: 2.0   # 노이즈 범위 (SwinIR과 동일)
+  noise_max_L: 10.0  # 노이즈 범위 (SwinIR과 동일)
 
 
 
 test:
   calculate_lpips: false
+  sr_save_prob: 0.01  # Validation 시 SR 샘플 저장 확률 (1%)

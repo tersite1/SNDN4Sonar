@@ -28,7 +28,7 @@ class DetectionPresetTrain:
 
 class DetectionPresetEval:
     def __init__(self):
-        
+
         transforms = [T.PILToTensor(),
                       T.ToDtype(torch.float, scale=True),]
 

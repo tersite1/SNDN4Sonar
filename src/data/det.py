@@ -142,7 +142,7 @@ class YoloDetectionDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         img_path = self.img_paths[idx]
         with Image.open(img_path) as img:
-            img = img.convert("RGB")
+            img = img.convert("L")  # ★ Grayscale for SonarSR
             width, height = img.size
 
             label_dir = self.label_dir if self.label_dir is not None else self.img_dir

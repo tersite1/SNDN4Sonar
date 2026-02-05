@@ -72,6 +72,17 @@ class ToDtype(nn.Module):
         return image, target
 
 
+class RepeatGrayscaleToRGB(nn.Module):
+    """Convert 1-channel grayscale tensor to 3-channel by repeating."""
+    def forward(
+        self, image: Tensor, target: Optional[Dict[str, Tensor]] = None
+    ) -> Tuple[Tensor, Optional[Dict[str, Tensor]]]:
+        if image.dim() == 3 and image.size(0) == 1:
+            # [1, H, W] → [3, H, W]
+            image = image.repeat(3, 1, 1)
+        return image, target
+
+
 class RandomIoUCrop(nn.Module):
     def __init__(
         self,
