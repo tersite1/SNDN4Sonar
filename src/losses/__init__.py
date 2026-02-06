@@ -3,6 +3,7 @@ from .common import L1Loss, MSELoss, FeatureLoss, PerceptualLoss
 from .det import DETLoss
 from .gan import GANLoss
 from .seg import AUXCELoss
+from .tdp_loss import MultiScaleObjectAwareTDPLoss
 
 def build_loss(opt_loss, logger):
     """Build loss from options.

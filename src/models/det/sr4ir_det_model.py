@@ -379,8 +379,21 @@ class SR4IRDetectionModel(BaseModel):
                     _, _, feat_sr = self.net_det(img_sr_list, return_feats=True)
                     _, _, feat_hr = self.net_det(img_hr_list, return_feats=True)
                     self.net_det.train()
-                    
-                    l_tdp = self.cri_tdp(feat_sr['features'], feat_hr['features'])
+
+                    # Check if using Multi-Scale Object-Aware TDP Loss
+                    if hasattr(self.cri_tdp, 'object_weight'):
+                        # Multi-Scale Object-Aware TDP: pass targets and image size
+                        img_size = img_hr_batch.shape[2:]  # (H, W)
+                        l_tdp = self.cri_tdp(
+                            feat_sr['features'],
+                            feat_hr['features'],
+                            targets=target_list,
+                            orig_size=img_size
+                        )
+                    else:
+                        # Legacy FeatureLoss: standard uniform matching
+                        l_tdp = self.cri_tdp(feat_sr['features'], feat_hr['features'])
+
                     metric_logger.meters["l_tdp"].update(l_tdp.item())
                     self.log_scalar('losses/l_tdp', l_tdp.item(), current_iter)
                     l_total_sr += l_tdp
