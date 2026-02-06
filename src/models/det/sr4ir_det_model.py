@@ -304,13 +304,16 @@ class SR4IRDetectionModel(BaseModel):
         metric_logger = MetricLogger(delimiter="  ")
         metric_logger.add_meter("lr_sr", SmoothedValue(window_size=1, fmt="{value}"))
         metric_logger.add_meter("lr_det", SmoothedValue(window_size=1, fmt="{value}"))
-        
+
+        # Gradient accumulation
+        accumulation_steps = self.opt['train'].get('accumulation_steps', 1)
+
         if self.dist:
             train_sampler.set_epoch(epoch)
-            
+
         if epoch < self.warmup_epoch + 1:
             self.text_logger.write("NOTICE: Doing warm-up")
-            
+
         # NOTE: without warmup, training explodes!!
         lr_scheduler_s = None
         lr_scheduler_d = None
@@ -350,7 +353,10 @@ class SR4IRDetectionModel(BaseModel):
             self.maybe_save_sr(img_sr_batch, filename=save_name, prob=save_prob)
             img_sr_list = self.batch_to_list(img_sr_batch, img_list=img_hr_list)
             for p in self.net_det.parameters(): p.requires_grad = False
-            self.optimizer_sr.zero_grad()
+
+            # Gradient accumulation: zero_grad only at the start of accumulation
+            if iter % accumulation_steps == 0:
+                self.optimizer_sr.zero_grad()
             l_total_sr = 0
             if hasattr(self, 'cri_pix'):
                 l_pix = self.cri_pix(img_sr_batch, img_hr_batch)
@@ -375,11 +381,16 @@ class SR4IRDetectionModel(BaseModel):
                     self.net_det.train()
                     
                     l_tdp = self.cri_tdp(feat_sr['features'], feat_hr['features'])
-                    metric_logger.meters["l_tdp"].update(l_tdp.item()) 
+                    metric_logger.meters["l_tdp"].update(l_tdp.item())
                     self.log_scalar('losses/l_tdp', l_tdp.item(), current_iter)
                     l_total_sr += l_tdp
-            l_total_sr.backward()
-            self.optimizer_sr.step()
+
+            # Gradient accumulation: scale loss and accumulate gradients
+            (l_total_sr / accumulation_steps).backward()
+
+            # Only update weights at accumulation boundaries or end of epoch
+            if (iter + 1) % accumulation_steps == 0 or (iter + 1) == len(data_loader_train):
+                self.optimizer_sr.step()
             
             # phase 2;
             # update network det, freeze net_cls
@@ -403,7 +414,10 @@ class SR4IRDetectionModel(BaseModel):
                 img_dnsr_list = img_sr_list
 
             for p in self.net_det.parameters(): p.requires_grad = True
-            self.optimizer_det.zero_grad()
+
+            # Gradient accumulation: zero_grad only at the start of accumulation
+            if iter % accumulation_steps == 0:
+                self.optimizer_det.zero_grad()
             l_total_det = 0
             loss_clip = self.opt['train'].get('det_loss_clip', None)
 
@@ -461,24 +475,30 @@ class SR4IRDetectionModel(BaseModel):
                 metric_logger.meters["l_det_cqmix"].update(l_det_cqmix.item())
                 self.log_scalar('losses/l_det_cqmix', l_det_cqmix.item(), current_iter)
                 l_total_det += l_det_cqmix
-            l_total_det.backward()
-            max_norm = self.opt['train'].get('det_grad_clip', 1.0)
-            if max_norm and max_norm > 0:
-                torch.nn.utils.clip_grad_norm_(self.net_det.parameters(), max_norm)
-            self.optimizer_det.step()
+
+            # Gradient accumulation: scale loss and accumulate gradients
+            (l_total_det / accumulation_steps).backward()
+
+            # Only update weights at accumulation boundaries or end of epoch
+            if (iter + 1) % accumulation_steps == 0 or (iter + 1) == len(data_loader_train):
+                max_norm = self.opt['train'].get('det_grad_clip', 1.0)
+                if max_norm and max_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(self.net_det.parameters(), max_norm)
+                self.optimizer_det.step()
             
             # psnr, lr
             psnr, valid_batch_size = calculate_psnr_batch(quantize(img_sr_batch), img_hr_batch)
             metric_logger.meters["psnr"].update(psnr.item(), n=valid_batch_size)
             metric_logger.update(lr_sr=round(self.optimizer_sr.param_groups[0]["lr"], 8))
             metric_logger.update(lr_det=round(self.optimizer_det.param_groups[0]["lr"], 8))
-            
-            # update learning rate
-            if epoch == 1:
-                lr_scheduler_s.step()
-                lr_scheduler_d.step()
-            else:
-                self.update_learning_rate()
+
+            # update learning rate (only when we actually updated weights)
+            if (iter + 1) % accumulation_steps == 0 or (iter + 1) == len(data_loader_train):
+                if epoch == 1:
+                    lr_scheduler_s.step()
+                    lr_scheduler_d.step()
+                else:
+                    self.update_learning_rate()
         return
             
     @torch.inference_mode()
@@ -506,19 +526,27 @@ class SR4IRDetectionModel(BaseModel):
             img_hr_list = list(img_hr.to(self.device) for img_hr in img_hr_list)
             target_list = [{k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in target_list]
 
-            # make on-the-fly LR image
-            img_hr_batch = self.list_to_batch(img_hr_list)
-            min_L, max_L = self.get_noise_L_range()
-            img_lr_batch = apply_sonar_noise(
-            img_hr_batch,           
-            downsample=self.scale,  
-            min_L=min_L, max_L=max_L,
-            use_rsample=self.learnable_noise,
-            )
-            # perform SR
-            img_sr_batch, _ = self._forward_sr(img_lr_batch)
-            img_sr_batch = self.force_grayscale(img_sr_batch)
-            img_sr_list = self.batch_to_list(img_sr_batch, img_list=img_hr_list)
+            # Baseline evaluation (epoch 0): Use HR images directly to verify detector works
+            # Training evaluation (epoch > 0): Use SR images from trained SR network
+            if epoch == 0:
+                # Baseline: Evaluate detector on HR images (same as detector training)
+                img_hr_batch = self.list_to_batch(img_hr_list)
+                img_sr_batch = self.force_grayscale(img_hr_batch)
+                img_sr_list = self.batch_to_list(img_sr_batch, img_list=img_hr_list)
+            else:
+                # make on-the-fly LR image
+                img_hr_batch = self.list_to_batch(img_hr_list)
+                min_L, max_L = self.get_noise_L_range()
+                img_lr_batch = apply_sonar_noise(
+                img_hr_batch,
+                downsample=self.scale,
+                min_L=min_L, max_L=max_L,
+                use_rsample=self.learnable_noise,
+                )
+                # perform SR
+                img_sr_batch, _ = self._forward_sr(img_lr_batch)
+                img_sr_batch = self.force_grayscale(img_sr_batch)
+                img_sr_list = self.batch_to_list(img_sr_batch, img_list=img_hr_list)
 
             # object detection
             if torch.cuda.is_available(): torch.cuda.synchronize()
@@ -533,11 +561,13 @@ class SR4IRDetectionModel(BaseModel):
 
             # evaluation on validation batch
             batch_size = len(img_sr_list)
-            psnr, valid_batch_size = calculate_psnr_batch(quantize(img_sr_batch), img_hr_batch)
-            metric_logger.meters["psnr"].update(psnr.item(), n=valid_batch_size)
-            if self.opt['test'].get('calculate_lpips', False):
-                lpips, valid_batch_size = calculate_lpips_batch(quantize(img_sr_batch), img_hr_batch, self.net_lpips)
-                metric_logger.meters["lpips"].update(lpips.item(), n=valid_batch_size)
+            # Skip PSNR/LPIPS for epoch 0 baseline (comparing HR to HR gives meaningless results)
+            if epoch > 0:
+                psnr, valid_batch_size = calculate_psnr_batch(quantize(img_sr_batch), img_hr_batch)
+                metric_logger.meters["psnr"].update(psnr.item(), n=valid_batch_size)
+                if self.opt['test'].get('calculate_lpips', False):
+                    lpips, valid_batch_size = calculate_lpips_batch(quantize(img_sr_batch), img_hr_batch, self.net_lpips)
+                    metric_logger.meters["lpips"].update(lpips.item(), n=valid_batch_size)
             res = {target["image_id"]: output for target, output in zip(target_list, outputs_sr)}
             coco_evaluator.update(res)
             num_processed_samples += batch_size
@@ -548,23 +578,29 @@ class SR4IRDetectionModel(BaseModel):
         
         # logging training state
         metric_summary = f"{header}"
-        metric_summary = self.add_metric(metric_summary, 'PSNR', metric_logger.psnr.global_avg, epoch)
-        if self.opt['test'].get('calculate_lpips', False):
-            metric_summary = self.add_metric(metric_summary, 'LPIPS', metric_logger.lpips.global_avg, epoch)
-        self.text_logger.write(metric_summary)
-        wandb_step = getattr(self, "current_iter", epoch)
-        val_metrics = {"val/psnr": metric_logger.psnr.global_avg}
-        if self.opt['test'].get('calculate_lpips', False):
-            val_metrics["val/lpips"] = metric_logger.lpips.global_avg
-        self.wandb_log(val_metrics, step=wandb_step)
-        if self.is_train and hasattr(self, "tb_logger"):
-            self.tb_logger.add_scalar("val/psnr", metric_logger.psnr.global_avg, epoch)
+        if epoch == 0:
+            metric_summary += " [Baseline: HR images, detector-only evaluation]"
+        else:
+            metric_summary = self.add_metric(metric_summary, 'PSNR', metric_logger.psnr.global_avg, epoch)
             if self.opt['test'].get('calculate_lpips', False):
-                self.tb_logger.add_scalar("val/lpips", metric_logger.lpips.global_avg, epoch)
+                metric_summary = self.add_metric(metric_summary, 'LPIPS', metric_logger.lpips.global_avg, epoch)
+        self.text_logger.write(metric_summary)
+
+        if epoch > 0:
+            wandb_step = getattr(self, "current_iter", epoch)
+            val_metrics = {"val/psnr": metric_logger.psnr.global_avg}
+            if self.opt['test'].get('calculate_lpips', False):
+                val_metrics["val/lpips"] = metric_logger.lpips.global_avg
+            self.wandb_log(val_metrics, step=wandb_step)
+            if self.is_train and hasattr(self, "tb_logger"):
+                self.tb_logger.add_scalar("val/psnr", metric_logger.psnr.global_avg, epoch)
+                if self.opt['test'].get('calculate_lpips', False):
+                    self.tb_logger.add_scalar("val/lpips", metric_logger.lpips.global_avg, epoch)
 
         # accumulate predictions from all images
         coco_evaluator.accumulate()
-        coco_evaluator.summarize(self.text_logger, tag='SR')
+        coco_evaluator.summarize(self.text_logger, tag='SR' if epoch > 0 else 'Baseline')
+        wandb_step = getattr(self, "current_iter", epoch) if epoch > 0 else epoch
         current_ap = self._log_coco_metrics(coco_evaluator, epoch, prefix="val/det", step=wandb_step)
 
         # Save best checkpoint based on mAP

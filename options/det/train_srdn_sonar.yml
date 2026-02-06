@@ -60,7 +60,8 @@ path:
 # Training Settings
 # ------------------------------------------------------------------------
 train:
-  batch_size: 2       # 2 GPUs -> per-GPU 1 (A6000 메모리 안전)
+  batch_size: 2       # 2 GPUs -> per-GPU 1
+  accumulation_steps: 2  # Gradient accumulation (effective batch = 2 * 2 = 4)
   epoch: 50           # 충분히 학습
   save_freq: 5        # 5 에포크마다 저장
   sr_save_prob: 0.001 # SR 샘플 이미지 저장 확률 (0.1% = 1000장당 1장)
