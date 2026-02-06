@@ -1,0 +1,145 @@
+# ------------------------------------------------------------------------
+# General Settings
+# ------------------------------------------------------------------------
+name: train_srdn_sonar_sonarsr_x4  # SonarSR 사용 실험
+model_type: sr4ir_det
+scale: 4
+num_gpu: 2
+manual_seed: 100
+num_threads: 16
+print_freq: 100
+dist_url: env://
+
+# ------------------------------------------------------------------------
+# Dataset Settings
+# ------------------------------------------------------------------------
+data:
+  path: /mnt/server16_hard1/LIGNEX1/yolo_data/combined/train/images
+  format: custom
+  is_voc: false
+  crop_size: 640
+
+# ------------------------------------------------------------------------
+# Network Settings
+# ------------------------------------------------------------------------
+# [SR Module] SonarSR: Denoising + SR
+network_sr:
+  name: sonarsr  # ★ SonarSR 사용
+  in_channels: 3  # RGB (R=G=B for sonar)
+  base_channels: 64
+  num_residual_blocks: 8
+  denoiser_global_residual: true  # Denoiser global residual
+  sr_upsample_type: pixelshuffle  # pixelshuffle or bilinear
+  sr_use_bicubic_residual: true  # SR bicubic residual
+  sr_num_resblocks: 16
+  scale: 4
+
+# [Detector] MLO Detector
+network_det:
+  name: SonarFasterRCNNDetector
+  backbone_variant: large
+  num_classes: 2
+
+# ------------------------------------------------------------------------
+# Path Settings
+# ------------------------------------------------------------------------
+path:
+  # SonarSR 프리트레인 모델 (소나 데이터로 학습됨!)
+  network_sr: /mnt/server16_hard0/kangwook/LIGNex1/SonarSR/checkpoints/sr_arch_pixelshuffle_globalo_v2/model_step_100000.pth
+  network_sr_key: generator_state_dict  # ✅ Verified!
+  strict_load: false  # 일부 레이어 불일치 무시 (1ch → 3ch)
+
+  # Detector 프리트레인 모델
+  network_det: /mnt/server16_hard1/LIGNEX1/SR4IR/runs_det_low/combined_dp/best.pth
+
+# ------------------------------------------------------------------------
+# Training Settings
+# ------------------------------------------------------------------------
+train:
+  batch_size: 4
+  epoch: 50
+  save_freq: 5
+
+  # Optimizer
+  optim_sr:
+    type: AdamW
+    lr: !!float 1e-4
+    weight_decay: 0
+    betas: [0.9, 0.999]
+
+  optim_det:
+    type: SGD
+    lr: !!float 2e-2
+    momentum: 0.9
+    weight_decay: !!float 1e-4
+
+  # Scheduler
+  scheduler_sr:
+    type: CosineAnnealingLR
+    T_max: 50
+    eta_min: 0
+  scheduler_det:
+    type: CosineAnnealingLR
+    T_max: 50
+    eta_min: 0
+
+  # ★ Phase 1 Loss (SR 학습용)
+  pixel_opt:
+    type: CharbonnierLoss  # L1보다 robust
+    loss_weight: !!float 0.1  # Task-driven 중심이므로 낮춤
+
+  tdp_opt:
+    type: FeatureLoss
+    loss_weight: !!float 3.0  # Task-driven loss 비중 높임
+    criterion: l1
+    layer_weights:
+      '0': 1.0
+      '1': 1.0
+      '2': 1.0
+
+  # ★ Phase 2 Loss (디텍터 적응용) - Full 4-Patch SonarMix
+  # ✅ SonarSR은 dual output (denoised_lr, final_sr)을 제공하므로 4-Patch 전부 사용 가능!
+
+  det_hr_opt:
+    type: DETLoss
+    loss_weight: !!float 0.3  # 원본 패치 (noisy HR, 640x640)
+
+  det_dn_opt:
+    type: DETLoss
+    loss_weight: !!float 0.3  # 디노이즈 LR 패치 (denoised_lr → bicubic → 640x640)
+
+  det_sr_opt:
+    type: DETLoss
+    loss_weight: !!float 0.5  # SR 패치 (denoised_lr → SR → 640x640)
+
+  det_dnsr_opt:
+    type: DETLoss
+    loss_weight: !!float 0.7  # 디노이즈+SR 패치 (best quality, same as det_sr for SonarSR)
+
+  # Optional: CQMix (legacy, can be disabled)
+  # det_cqmix_opt:
+  #   type: DETLoss
+  #   loss_weight: !!float 0.5
+
+  det_loss_clip: 0.2
+  det_grad_clip: 0.6
+
+  # Learnable noise parameters
+  learnable_noise: true
+  noise_min_L: 2.0
+  noise_max_L: 10.0
+
+  # Warmup
+  warmup_epoch: 3
+  eval_freq: 1
+
+  # SR sample saving
+  sr_save_prob: 0.01
+
+# ------------------------------------------------------------------------
+# Test Settings
+# ------------------------------------------------------------------------
+test:
+  calculate_lpips: false
+  visualize: false
+  sr_save_prob: 0.01

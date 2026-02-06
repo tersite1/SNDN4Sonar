@@ -7,11 +7,35 @@ datasets
 __pycache__/
 *.py[cod]
 *.swp
+*.pyc
+*.pyo
 
 # files for experiments
 scripts
 rm_archives.sh
 
+# training outputs
 runs_det_low
+runs_det_gray1ch
 experiments
 __pycache__
+
+# temporary files
+tmp/
+*.log
+*.pth.tar
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation
+docs/
+
+# Submodules (if not needed)
+SonarSR/
