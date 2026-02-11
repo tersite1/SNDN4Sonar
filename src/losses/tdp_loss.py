@@ -36,7 +36,7 @@ class MultiScaleObjectAwareTDPLoss(nn.Module):
         criterion: str = 'l1',
         object_weight: float = 5.0,
         background_weight: float = 1.0,
-        spatial_sigma: float = 3.0,
+        spatial_sigma: float = 1.5,
         use_input_norm: bool = False,
     ):
         super().__init__()
@@ -98,10 +98,10 @@ class MultiScaleObjectAwareTDPLoss(nn.Module):
             boxes_feat = boxes.clone()
             boxes_feat[:, [0, 2]] *= scale_w  # x coords
             boxes_feat[:, [1, 3]] *= scale_h  # y coords
-            boxes_feat = boxes_feat.clamp(
-                min=0,
-                max=torch.tensor([W_feat-1, H_feat-1, W_feat-1, H_feat-1], device=device)
-            )
+
+            # Clamp to feature map bounds
+            boxes_feat[:, [0, 2]] = boxes_feat[:, [0, 2]].clamp(0, W_feat - 1)
+            boxes_feat[:, [1, 3]] = boxes_feat[:, [1, 3]].clamp(0, H_feat - 1)
 
             # Create object mask for this batch
             for box in boxes_feat:

@@ -17,6 +17,7 @@ def parse_options():
     parser.add_argument('-opt', type=str, required=True, help='Path to option YAML file.')
     parser.add_argument('--test_only', action='store_true')
     parser.add_argument('--visualize', action='store_true')
+    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint for resuming training.')
     args = parser.parse_args()
 
     # parse yml to dict
@@ -43,7 +44,11 @@ def parse_options():
         opt['test_only'] = True
     if args.visualize:
         opt['test']['visualize'] = True
-    
+
+    # resume training
+    if args.resume:
+        opt['resume'] = args.resume
+
     if opt.get('test_only', False):
         opt['test']['calculate_lpips'] = True
         if opt.get('train', False):

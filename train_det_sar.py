@@ -1,6 +1,6 @@
 """
-Train 1-channel grayscale detector (Faster R-CNN + MobileNetV3)
-Modified from train_det_low.py for grayscale input
+Train 1-channel grayscale detector for SAR (Faster R-CNN + MobileNetV3)
+SAR Ship Detection: HRSID / SSDD datasets
 """
 import argparse
 import json
@@ -49,7 +49,7 @@ class GrayscaleDetDataset(Dataset):
         items: List[Tuple[Path, Path, str]],
         enforce_640: bool = True,
         yolo_normalized: bool = False,
-        num_classes: int = 3,
+        num_classes: int = 2,  # SAR: background + ship
     ) -> None:
         self.items = items
         self.enforce_640 = enforce_640
@@ -92,7 +92,7 @@ class GrayscaleDetDataset(Dataset):
                 continue
             if x2 <= x1 or y2 <= y1:
                 continue
-            cls = obj["class_id"] + 1  # Class 1: cylinder, Class 2: manta (0=background)
+            cls = obj["class_id"] + 1  # SAR: Class 0 → 1 (ship), background=0
             if cls <= 0 or cls >= self.num_classes:
                 continue
             boxes.append([x1, y1, x2, y2])
@@ -190,7 +190,7 @@ def compute_metrics(model, loader, device, num_classes=3, iou_thresh=0.5, conf_t
 
     # Compute AP per class
     aps = {}
-    class_names = {1: "cylinder", 2: "manta"}
+    class_names = {1: "ship"}  # SAR: single class
 
     for cls in range(1, num_classes):  # Skip background (class 0)
         if cls not in all_preds or all_gts[cls] == 0:
@@ -236,16 +236,17 @@ def parse_args():
     # Filter out --local-rank and --local_rank arguments
     filtered_args = [arg for arg in sys.argv[1:] if not arg.startswith('--local-rank') and not arg.startswith('--local_rank')]
 
-    parser = argparse.ArgumentParser(description="Train 1-channel grayscale detector")
+    parser = argparse.ArgumentParser(description="Train SAR ship detector (1-channel grayscale)")
     parser.add_argument("--img_dir", type=Path, required=True, help="images directory")
     parser.add_argument("--label_dir", type=Path, required=True, help="labels directory")
     parser.add_argument("--yolo_normalized", action="store_true")
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch", type=int, default=4)
     parser.add_argument("--lr", type=float, default=5e-3)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--save_dir", type=Path, default=Path("runs_det_gray1ch"))
+    parser.add_argument("--save_dir", type=Path, default=Path("runs_det_sar"))
+    parser.add_argument("--dataset", type=str, default="", help="Dataset name (hrsid/ssdd)")
     return parser.parse_args(filtered_args)
 
 
@@ -273,7 +274,7 @@ def main():
     imgs = sorted([p for p in args.img_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}])
     train_items = [(img_path, args.label_dir, "txt") for img_path in imgs]
 
-    ds = GrayscaleDetDataset(train_items, enforce_640=True, yolo_normalized=args.yolo_normalized, num_classes=3)
+    ds = GrayscaleDetDataset(train_items, enforce_640=False, yolo_normalized=args.yolo_normalized, num_classes=2)  # SAR: 원본 크기 유지 (HRSID 800, SSDD 가변)
 
     if is_distributed:
         sampler = DistributedSampler(ds, num_replicas=world_size, rank=rank, shuffle=True)
@@ -281,7 +282,7 @@ def main():
     else:
         loader = DataLoader(ds, batch_size=args.batch, shuffle=True, num_workers=args.workers, collate_fn=collate_fn)
 
-    num_classes = 3  # Class 0: background, Class 1: cylinder, Class 2: manta
+    num_classes = 2  # SAR: Class 0: background, Class 1: ship
     model = SonarFasterRCNNDetector(
         num_classes=num_classes,
         min_size=640,
@@ -299,10 +300,13 @@ def main():
     optimizer = torch.optim.SGD(params, lr=args.lr, momentum=0.9, weight_decay=1e-4)
 
     if rank == 0:
+        # Add dataset name to save_dir if provided
+        if args.dataset:
+            args.save_dir = args.save_dir / args.dataset
         args.save_dir.mkdir(parents=True, exist_ok=True)
         metrics_file = args.save_dir / "metrics.txt"
         with open(metrics_file, "w") as f:
-            f.write("epoch,train_loss,mAP,AP_cylinder,AP_manta,recall\n")
+            f.write("epoch,train_loss,mAP,AP_ship,recall\n")
     best_loss = float("inf")
     best_map = 0.0
     best_recall = 0.0
@@ -365,10 +369,9 @@ def main():
             prev_recall = recall
 
             # Save metrics
-            ap_cyl = aps.get(1, 0.0)
-            ap_manta = aps.get(2, 0.0)
+            ap_ship = aps.get(1, 0.0)
             with open(metrics_file, "a") as f:
-                f.write(f"{epoch},{epoch_loss:.6f},{mAP:.6f},{ap_cyl:.6f},{ap_manta:.6f},{recall:.6f}\n")
+                f.write(f"{epoch},{epoch_loss:.6f},{mAP:.6f},{ap_ship:.6f},{recall:.6f}\n")
 
             # Save model
             state_dict = model.module.state_dict() if is_distributed else model.state_dict()

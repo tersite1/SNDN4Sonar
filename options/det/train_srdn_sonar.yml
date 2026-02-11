@@ -4,7 +4,7 @@
 name: train_sonarsr_det_x8  # 실험 이름 (SonarSR 사용, scale x8 원래대로)
 model_type: sr4ir_det
 scale: 8                    # ★ SonarSR 원본 가중치와 동일 (8배)
-num_gpu: 2                  # A6000 2대 사용
+num_gpu: 1                  # GPU 1대 사용 (GPU 5번)
 manual_seed: 100
 num_threads: 16
 print_freq: 100  # unit: iter
@@ -44,29 +44,33 @@ network_det:
   num_classes: 3                 # 배경 + cylinder + manta (총 3개 클래스)
 
 # ------------------------------------------------------------------------
-# Path Settings (가중치 연결)
+# Resume Training (CRITICAL: top-level key, not under 'path')
+# ------------------------------------------------------------------------
+# [RESUME] epoch 2까지 완료된 체크포인트에서 재개 → epoch 3부터 시작
+resume: experiments/det/train_sonarsr_det_x8_archived_20260210_133229/checkpoints/checkpoint_latest.pth
+
+# ------------------------------------------------------------------------
+# Path Settings (가중치 연결) - ★ Resume 시에도 필요 (load_network 함수에서 체크)
 # ------------------------------------------------------------------------
 path:
-  # [학생 초기값] SonarSR Pre-trained 모델 (kangwook) - scale=8 원본
+  # [학생 초기값] SonarSR Pre-trained 모델 - resume 시에는 사용 안 함 (checkpoint에서 로드)
   network_sr: /mnt/server16_hard0/kangwook/LIGNex1/SonarSR/checkpoints/sr_arch_pixelshuffle_globalo_v2/model_step_100000.pth
-  network_sr_key: null  # SonarSR 체크포인트의 키 구조에 맞게 조정 (필요시 'model' or 'state_dict')
-  strict_load: false    # 일부 키 불일치 무시
-  # [선생님 초기값] ★ 640×640 TRUE 1-channel grayscale 디텍터 경로 (train_det_gray1ch.py로 학습)
+  network_sr_key: null
+  strict_load: false
+  # [선생님 초기값] - resume 시에는 사용 안 함 (checkpoint에서 로드)
   network_det: /mnt/server16_hard1/LIGNEX1/SR4IR/runs_det_gray1ch/combined_1ch/best_map.pth
-  # 재개할 경우
-  # resume_state: experiments/train_srdn_sonar_x4/training_states/1000.state
 
 # ------------------------------------------------------------------------
 # Training Settings
 # ------------------------------------------------------------------------
 train:
-  batch_size: 2       # 2 GPUs -> per-GPU 1
-  accumulation_steps: 2  # Gradient accumulation (effective batch = 2 * 2 = 4)
+  batch_size: 2       # Per-GPU batch size (1 GPU)
+  accumulation_steps: 4  # Gradient accumulation (effective batch = 2 * 4 = 8)
   epoch: 50           # 충분히 학습
   save_freq: 5        # 5 에포크마다 저장
   sr_save_prob: 0.001 # SR 샘플 이미지 저장 확률 (0.1% = 1000장당 1장)
-  warmup_epoch: 5     # 처음 5 epoch은 SR만 학습 (아티팩트 감소)
-  eval_freq: 1        # 매 에포크마다 검증
+  warmup_epoch: 0     # 처음 5 epoch은 SR만 학습 (아티팩트 감소)
+  eval_freq: 5        # 5 에포크마다 검증 (학습 속도 향상)
   
   # Optimizer
   optim_sr:
@@ -77,7 +81,7 @@ train:
 
   optim_det:
     type: SGD
-    lr: !!float 1e-2  # 학습률 낮춤 (안정성)
+    lr: !!float 1e-3  # Pretrained detector 보호 (1e-2 → 1e-3, 10배 감소)
     momentum: 0.9
     weight_decay: !!float 1e-4
 
@@ -94,7 +98,7 @@ train:
   # ★ Phase 1 Loss (SR 학습용)
   pixel_opt:
     type: L1Loss
-    loss_weight: !!float 1.0  # SwinIR과 유사하게 (균형)
+    loss_weight: !!float 2.0  # Pixel quality 기본 확보
 
   # SonarSR denoised LR에 대한 pixel loss (중간 supervision)
   pixel_dn_opt:
@@ -103,38 +107,34 @@ train:
 
   tdp_opt:
     type: MultiScaleObjectAwareTDPLoss  # ★ Multi-Scale + Object-Aware TDP
-    loss_weight: !!float 1.0
+    loss_weight: !!float 0.1  # l_tdp ~14이므로 0.1로 균형 (실제 기여 ~1.4)
     criterion: l1
-    # Multi-scale FPN features (MobileNetV3-FPN typically has 4 levels)
-    # Higher resolution features get higher weights (more relevant for small objects)
+    # Multi-scale FPN features (MobileNetV3-FPN outputs: '0', '1', 'pool')
+    # Note: '0' and '1' have same resolution (20x20 for 640 input, stride 32)
+    # 'pool' is lower resolution (10x10, stride 64)
     layer_weights:
-      '0': 1.0   # Highest resolution (stride 8)  - most important for MLO detection
-      '1': 0.5   # Medium resolution  (stride 16) - contextual features
-      '2': 0.25  # Lower resolution   (stride 32) - global context
-      '3': 0.1   # Lowest resolution  (stride 64) - very global features
+      '0': 1.0    # FPN level 0 (stride 32, 20x20) - primary feature
+      '1': 0.5    # FPN level 1 (stride 32, 20x20) - additional context
+      'pool': 0.2 # Pooled feature (stride 64, 10x10) - global context
     # Object-aware spatial weighting parameters
     object_weight: !!float 5.0      # Weight boost for object regions (5x background)
     background_weight: !!float 1.0  # Base weight for background
-    spatial_sigma: !!float 3.0      # Gaussian smoothing sigma for weight map
+    spatial_sigma: !!float 1.5      # Gaussian smoothing sigma for weight map (focused object weighting)
 
-  # ★ Phase 2 Loss (디텍터 적응용) - SonarMix Strategy (3-Patch)
-  # SonarSR은 denoised LR도 출력하므로 더 많은 패치 전략 사용 가능
-  # CQMix 제거, 간단한 SonarMix만 사용 (메모리 절약)
+  # ★ Phase 2 Loss (디텍터 적응용) - CQMix + SR Strategy (2-forward, 1.5x faster)
+  # CQMix: HR+SR 패치 혼합 (검증된 방법, 일반화 good)
+  # SR: 순수 SR 이미지 학습
 
-  det_hr_opt:
-    type: DETLoss
-    loss_weight: !!float 0.2  # 원본 noisy 패치 (robustness)
-
-  det_dn_opt:
-    type: DETLoss
-    loss_weight: !!float 0.3  # Denoised LR 패치 (SonarSR 중간 출력)
+  # det_hr_opt: ❌ CQMix에 HR 포함됨
+  # det_dn_opt: ❌ 속도 향상 위해 제거
 
   det_sr_opt:
     type: DETLoss
-    loss_weight: !!float 0.6  # SR 패치 (clean, high quality - 주력)
+    loss_weight: !!float 1.0  # 순수 SR 패치 학습
 
-  # det_dnsr_opt: ❌ SonarSR에서는 det_sr과 동일하므로 생략
-  # det_cqmix_opt: ❌ 메모리 절약 (나중에 추가 가능)
+  det_cqmix_opt:
+    type: DETLoss
+    loss_weight: !!float 1.0  # HR+SR 혼합 (일반화, 검증된 방법)
 
   det_loss_clip: 0.3    # Gradient clipping (SwinIR과 유사)
   det_grad_clip: 0.8    # Gradient clipping (SwinIR과 유사)

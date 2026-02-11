@@ -657,11 +657,13 @@ class SR4IRDetectionModel(BaseModel):
 
         return
 
-    def save(self, epoch):            
+    def save(self, epoch):
         checkpoint = {"epoch": epoch,
                       "opt": self.opt,
                       "net_sr": self.get_bare_model(self.net_sr).state_dict(),
                       "net_det": self.get_bare_model(self.net_det).state_dict(),
+                      "optimizer_sr": self.optimizer_sr.state_dict(),
+                      "optimizer_det": self.optimizer_det.state_dict(),
                       'schedulers': [],
                       }
         for s in self.schedulers:
@@ -676,3 +678,30 @@ class SR4IRDetectionModel(BaseModel):
         save_on_master(self.get_bare_model(self.net_det).state_dict(), osp.join(self.exp_dir, 'models', "net_det_latest.pth"))
         save_on_master(checkpoint, osp.join(self.exp_dir, 'checkpoints', "checkpoint_latest.pth"))
         return
+
+    def resume_training(self, resume_path):
+        """Reload networks, optimizers and schedulers for resumed training."""
+        import torch
+        resume_state = torch.load(resume_path, map_location="cpu")
+
+        # Load schedulers
+        resume_schedulers = resume_state['schedulers']
+        assert len(resume_schedulers) == len(self.schedulers), 'Wrong lengths of schedulers'
+        for i, s in enumerate(resume_schedulers):
+            self.schedulers[i].load_state_dict(s)
+
+        # Load optimizers
+        if 'optimizer_sr' in resume_state:
+            self.optimizer_sr.load_state_dict(resume_state['optimizer_sr'])
+        if 'optimizer_det' in resume_state:
+            self.optimizer_det.load_state_dict(resume_state['optimizer_det'])
+
+        # Load networks
+        if 'net_sr' in resume_state:
+            self.get_bare_model(self.net_sr).load_state_dict(resume_state['net_sr'], strict=True)
+        if 'net_det' in resume_state:
+            self.get_bare_model(self.net_det).load_state_dict(resume_state['net_det'], strict=True)
+
+        self.text_logger.write(f'Resume training from {resume_path}')
+
+        return resume_state['epoch']

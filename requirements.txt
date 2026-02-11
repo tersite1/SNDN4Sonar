@@ -1,0 +1,33 @@
+# SR4IR Requirements
+# Install: pip install -r requirements.txt
+
+# PyTorch (CUDA 11.8)
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.0.1
+torchvision==0.15.2
+
+# Core
+numpy
+scipy
+pillow
+pyyaml
+tqdm
+
+# Logging
+wandb
+tensorboard
+
+# Detection metrics
+pycocotools
+
+# Image quality metrics
+lpips
+
+# OpenCV
+opencv-python-headless
+
+# Model complexity
+ptflops
+
+# Cython (pycocotools dependency)
+cython

@@ -1,0 +1,121 @@
+# ------------------------------------------------------------------------
+# General Settings - A100 x 2 GPU Configuration
+# ------------------------------------------------------------------------
+name: train_sonarsr_det_x8_a100  # A100 2GPU 학습
+model_type: sr4ir_det
+scale: 8
+num_gpu: 2                  # A100 2대
+manual_seed: 123412
+num_threads: 16
+print_freq: 100
+dist_url: env://
+find_unused_parameters: true
+
+# ------------------------------------------------------------------------
+# Dataset Settings
+# ------------------------------------------------------------------------
+data:
+  path: /mnt/server16_hard1/LIGNEX1/yolo_data/combined/train/images
+  format: custom
+  is_voc: false
+  crop_size: 640
+  yolo_normalized: true
+  merge_classes: false
+  label_offset: 1
+
+# ------------------------------------------------------------------------
+# Network Settings
+# ------------------------------------------------------------------------
+network_sr:
+  name: sonarsr
+  scale: 8
+  in_channels: 1
+  base_channels: 64
+  num_residual_blocks: 8
+
+network_det:
+  name: SonarFasterRCNNDetector
+  backbone_variant: large
+  num_classes: 3
+
+# ------------------------------------------------------------------------
+# Path Settings (Pretrained weights)
+# ------------------------------------------------------------------------
+path:
+  network_sr: /mnt/server16_hard0/kangwook/LIGNex1/SonarSR/checkpoints/sr_arch_pixelshuffle_globalo_v2/model_step_100000.pth
+  network_sr_key: null
+  strict_load: false
+  network_det: /mnt/server16_hard1/LIGNEX1/SR4IR/runs_det_gray1ch/combined_1ch/best_map.pth
+
+# ------------------------------------------------------------------------
+# Training Settings - A100 Optimized
+# ------------------------------------------------------------------------
+train:
+  batch_size: 2             # Per GPU batch size
+  accumulation_steps: 4     # Effective batch = 2 * 4 * 2 = 16
+  epoch: 50
+  save_freq: 5
+  sr_save_prob: 0.001
+  warmup_epoch: 0
+  eval_freq: 1
+
+  optim_sr:
+    type: AdamW
+    lr: !!float 5e-5
+    weight_decay: 0
+    betas: [0.9, 0.999]
+
+  optim_det:
+    type: SGD
+    lr: !!float 1e-3
+    momentum: 0.9
+    weight_decay: !!float 1e-4
+
+  scheduler_sr:
+    type: CosineAnnealingLR
+    T_max: 50
+    eta_min: 0
+  scheduler_det:
+    type: CosineAnnealingLR
+    T_max: 50
+    eta_min: 0
+
+  # Phase 1 Loss (SR)
+  pixel_opt:
+    type: L1Loss
+    loss_weight: !!float 2.0
+
+  pixel_dn_opt:
+    type: L1Loss
+    loss_weight: !!float 0.5
+
+  tdp_opt:
+    type: MultiScaleObjectAwareTDPLoss
+    loss_weight: !!float 0.1
+    criterion: l1
+    layer_weights:
+      '0': 1.0
+      '1': 0.5
+      'pool': 0.2
+    object_weight: !!float 5.0
+    background_weight: !!float 1.0
+    spatial_sigma: !!float 1.5
+
+  # Phase 2 Loss (Detector) - CQMix + SR
+  det_sr_opt:
+    type: DETLoss
+    loss_weight: !!float 1.0
+
+  det_cqmix_opt:
+    type: DETLoss
+    loss_weight: !!float 1.0
+
+  det_loss_clip: 0.3
+  det_grad_clip: 0.8
+  learnable_noise: true
+  noise_min_L: 2.0
+  noise_max_L: 10.0
+
+test:
+  calculate_lpips: false
+  sr_save_prob: 0.01
