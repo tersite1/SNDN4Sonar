@@ -14,7 +14,7 @@ from .dist import is_main_process
 
 def parse_options():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-opt', type=str, required=True, help='Path to option YAML file.')
+    parser.add_argument('--opt', type=str, required=True, help='Path to option YAML file.')
     parser.add_argument('--test_only', action='store_true')
     parser.add_argument('--visualize', action='store_true')
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint for resuming training.')
@@ -45,7 +45,9 @@ def parse_options():
     if args.visualize:
         opt['test']['visualize'] = True
 
-    # resume training
+    # resume training (argparse로만 제어, config 무시)
+    if 'resume' in opt:
+        del opt['resume']  # config의 resume 무시
     if args.resume:
         opt['resume'] = args.resume
 

@@ -1,0 +1,29 @@
+# Detector Evaluation Config
+name: eval_det
+
+# Dataset
+data:
+  path: /mnt/server16_hard1/LIGNEX1/yolo_data/combined/train/images
+  format: custom
+  is_voc: false
+  crop_size: 640
+  yolo_normalized: true
+  merge_classes: false
+  label_offset: 1
+  focus_only: false  # Set to true for focus-only evaluation
+
+# Detector
+network_det:
+  name: SonarFasterRCNNDetector
+  use_1ch: true
+  backbone_variant: large
+  num_classes: 3
+  image_mean: [0.449]
+  image_std: [0.226]
+
+# Checkpoint path
+path:
+  # SR4IR trained detector (best mAP) - archived version
+  network_det: /mnt/server16_hard1/LIGNEX1/SR4IR/experiments/det/sonarsr_window_wowbatch_archived_20260217_132728/models/net_det_best.pth
+  # Or use pretrained baseline:
+  # network_det: /mnt/server16_hard1/LIGNEX1/SR4IR/runs_det_pure1ch_pretrained/best_map.pth

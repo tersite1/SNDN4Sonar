@@ -1,18 +1,18 @@
 # ------------------------------------------------------------------------
-# General Settings - A100 x 2 GPU Configuration
+# General Settings - 3090 x 4 GPU Configuration
 # ------------------------------------------------------------------------
-name: noisewow
+name: train_sonarsr_det_x8_3090  # 3090 4GPU 학습
 model_type: sr4ir_det
 
 # WandB Logging
 wandb:
   project: SR4IR
-  run_name: noisewow
+  run_name: sonarsr4ir_3090_4gpu
   mode: online
 
 scale: 8                    # ★ SonarSR 원본 가중치와 동일 (8배)
-num_gpu: 2                  # A100 2대
-manual_seed: 123412
+num_gpu: 4                  # 3090 4대
+manual_seed: 1023
 num_threads: 16
 print_freq: 100
 dist_url: env://
@@ -49,7 +49,7 @@ network_det:
   image_std: [0.226]
 
 # ------------------------------------------------------------------------
-# Path Settings (Original Pretrained)
+# Path Settings (Pretrained weights)
 # ------------------------------------------------------------------------
 path:
   network_sr: /mnt/server16_hard0/kangwook/LIGNex1/SonarSR/checkpoints/sr_arch_pixelshuffle_globalo_v2/model_step_100000.pth
@@ -58,18 +58,18 @@ path:
   network_det: /mnt/server16_hard1/LIGNEX1/SR4IR/runs_det_pure1ch_pretrained/best_map.pth
 
 # ------------------------------------------------------------------------
-# Training Settings - A100 Optimized
+# Training Settings - 3090 4GPU (배치 1, effective batch = 1*4*8 = 32)
 # ------------------------------------------------------------------------
 train:
-  batch_size: 4             # Per GPU batch size
-  accumulation_steps: 2     # Effective batch = 4 * 2 * 2 = 16
+  batch_size: 1             # Per GPU batch size (3090 24GB)
+  accumulation_steps: 8     # Effective batch = 1 * 4 * 8 = 32 (원본과 동일)
   epoch: 50
   save_freq: 5
   sr_save_prob: 0.001
   warmup_epoch: 0
   eval_freq: 1
 
-  # Optimizer
+  # Optimizer (원본과 동일)
   optim_sr:
     type: AdamW
     lr: !!float 5e-5
@@ -82,7 +82,7 @@ train:
     momentum: 0.9
     weight_decay: !!float 1e-4
 
-  # Scheduler
+  # Scheduler (원본과 동일)
   scheduler_sr:
     type: CosineAnnealingLR
     T_max: 50
@@ -92,7 +92,7 @@ train:
     T_max: 50
     eta_min: 0
 
-  # ★ Phase 1 Loss (SR 학습용)
+  # ★ Phase 1 Loss (SR 학습용) - 원본과 동일
   pixel_opt:
     type: L1Loss
     loss_weight: !!float 1.0
@@ -113,7 +113,7 @@ train:
     background_weight: !!float 1.0
     spatial_sigma: !!float 1.5
 
-  # ★ Phase 2 Loss (디텍터 적응용)
+  # ★ Phase 2 Loss (디텍터 적응용) - 원본과 동일
   det_hr_opt:
     type: DETLoss
     loss_weight: !!float 1.0

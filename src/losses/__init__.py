@@ -1,8 +1,6 @@
-from .cls import CELoss
 from .common import L1Loss, MSELoss, FeatureLoss, PerceptualLoss
 from .det import DETLoss
 from .gan import GANLoss
-from .seg import AUXCELoss
 from .tdp_loss import MultiScaleObjectAwareTDPLoss
 
 def build_loss(opt_loss, logger):
@@ -12,5 +10,5 @@ def build_loss(opt_loss, logger):
     loss_type = opt_loss.pop('type')
     loss = eval(loss_type)(**opt_loss)
     logger.write(f'Loss {loss_type} is created')
-    
+
     return loss

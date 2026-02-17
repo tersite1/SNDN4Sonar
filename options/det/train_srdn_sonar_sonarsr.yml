@@ -126,8 +126,8 @@ train:
 
   # Learnable noise parameters
   learnable_noise: true
-  noise_min_L: 2.0
-  noise_max_L: 10.0
+  noise_min_L: 0.05  # ★ SonarSR 원본과 동일
+  noise_max_L: 0.5   # ★ SonarSR 원본과 동일
 
   # Warmup
   warmup_epoch: 3

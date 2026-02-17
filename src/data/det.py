@@ -69,6 +69,7 @@ class YoloDetectionDataset(torch.utils.data.Dataset):
         label_offset=1,
         num_classes=2,
         label_ext=".txt",
+        focus_only=False,  # ★ focus 이미지만 사용
     ):
         self.img_dir = Path(img_dir) if img_dir is not None else None
         self.label_dir = Path(label_dir) if label_dir is not None else None
@@ -80,6 +81,12 @@ class YoloDetectionDataset(torch.utils.data.Dataset):
         self.label_ext = label_ext
 
         self.img_paths = _list_images(self.img_dir) if self.img_dir else []
+
+        # ★ focus 이미지만 필터링
+        if focus_only:
+            self.img_paths = [p for p in self.img_paths if "_focus_" in p.name]
+            print(f"[Dataset] focus_only=True: filtered to {len(self.img_paths)} focus images")
+
         if not self.img_paths:
             raise FileNotFoundError(f"No images found in {self.img_dir}")
 
@@ -197,6 +204,7 @@ def load_det_data(opt):
             label_offset = opt['data'].get('label_offset', 1)
             num_classes = opt['data'].get('num_classes', opt.get('network_det', {}).get('num_classes', None))
             label_ext = opt['data'].get('label_ext', '.txt')
+            # ★ 학습은 전체 데이터
             dataset_train = YoloDetectionDataset(
                 train_img_dir,
                 train_label_dir,
@@ -206,8 +214,9 @@ def load_det_data(opt):
                 label_offset=label_offset,
                 num_classes=num_classes,
                 label_ext=label_ext,
+                focus_only=False,
             )
-            
+
     if data_format == 'coco':
         dataset_test = get_coco(root=opt['data']['path'], image_set='val', transforms=transform_test, mode="instances", is_voc=is_voc)
     elif data_format == 'voc':
@@ -223,6 +232,7 @@ def load_det_data(opt):
         label_offset = opt['data'].get('label_offset', 1)
         num_classes = opt['data'].get('num_classes', opt.get('network_det', {}).get('num_classes', None))
         label_ext = opt['data'].get('label_ext', '.txt')
+        eval_focus_only = opt['data'].get('eval_focus_only', False)  # ★ 평가만 focus
         dataset_test = YoloDetectionDataset(
             val_img_dir,
             val_label_dir,
@@ -232,6 +242,7 @@ def load_det_data(opt):
             label_offset=label_offset,
             num_classes=num_classes,
             label_ext=label_ext,
+            focus_only=eval_focus_only,
         )
 
     # distributed training

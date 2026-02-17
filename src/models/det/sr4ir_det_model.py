@@ -12,36 +12,47 @@ from utils.det import MetricLogger, SmoothedValue, get_coco_api_from_dataset, _g
 
 from .base_model import BaseModel
 
-def apply_sonar_noise(image, downsample=4, min_L=2.0, max_L=10.0, use_rsample=False):
-    # 1. 다운샘플링 (LR 입력 생성)
+def apply_sonar_noise(image, downsample=8, min_L=0.05, max_L=0.5, use_rsample=False):
+    """
+    SonarSR 원본과 완전히 동일한 노이즈 적용 (data_utils.py 참조)
+
+    ★ SonarSR 원본과 동일하게 np.random.uniform() 사용!
+    - Input image: [0, 1] 범위 (SR4IR 데이터 로더)
+    - Output: [-1, 1] 범위 (SonarSR 입력용)
+    """
+    # 1. 노이즈 강도 파라미터 생성 (★ SonarSR과 동일하게 numpy 사용)
+    if torch.is_tensor(min_L):
+        min_L_val = float(min_L.cpu())
+    else:
+        min_L_val = float(min_L)
+    if torch.is_tensor(max_L):
+        max_L_val = float(max_L.cpu())
+    else:
+        max_L_val = float(max_L)
+
+    dist = np.random.uniform(min_L_val, max_L_val)
+    dist = dist * (downsample ** 2)
+    gamma_dist = torch.distributions.Gamma(dist, dist)
+
+    # 2. 다운샘플링 (LR 입력 생성)
     if downsample != 1:
         downsample_image = interpolate(image, scale_factor=1 / downsample, mode='bilinear', align_corners=False)
     else:
         downsample_image = image
-    # 2. 노이즈 파라미터 생성
-    if torch.is_tensor(min_L):
-        min_L = min_L.to(device=image.device)
-    else:
-        min_L = torch.tensor(float(min_L), device=image.device)
-    if torch.is_tensor(max_L):
-        max_L = max_L.to(device=image.device)
-    else:
-        max_L = torch.tensor(float(max_L), device=image.device)
-    dist = min_L + (max_L - min_L) * torch.rand((), device=image.device)
-    dist = dist * (downsample**2)
-    gamma_dist = torch.distributions.Gamma(dist, dist)
-    
+
     # 3. 노이즈 생성
     if use_rsample and gamma_dist.has_rsample:
         noise = gamma_dist.rsample(downsample_image.shape)
     else:
         noise = gamma_dist.sample(downsample_image.shape)
     noise = noise.to(device=image.device)
-    
-    # 4. 스펙클 노이즈 적용 (0~1 범위 가정: 단순히 곱하기)
-    # 소나 노이즈: Signal * Noise
+
+    # 4. ★ SonarSR 원본 방식: [0,1] 공간에서 노이즈 적용 후 [-1,1]로 변환
+    # downsample_image는 [0, 1] 범위
     noisy_image = (downsample_image * noise).clamp(0, 1)
-    
+    # ★ [-1, 1] 범위로 변환 (SonarSR 입력 형식)
+    noisy_image = 2 * noisy_image - 1
+
     return noisy_image
 
 def make_model(opt):
@@ -69,6 +80,28 @@ class SR4IRDetectionModel(BaseModel):
         # define network sr
         opt['network_sr']['scale'] = self.scale
         self.net_sr = build_network(opt['network_sr'], self.text_logger, tag='net_sr')
+
+        # ★ SR 가중치 로드 전 검증
+        self.text_logger.write("="*60)
+        self.text_logger.write("[SR Weight Verification] BEFORE loading checkpoint:")
+        self.text_logger.write(f"  SR class: {type(self.get_bare_model(self.net_sr)).__name__}")
+        sr_state = self.get_bare_model(self.net_sr).state_dict()
+        sr_first_key = 'denoiser.initial_conv.weight'
+        if sr_first_key in sr_state:
+            self.text_logger.write(f"  Model denoiser first conv: {sr_state[sr_first_key].shape}")
+
+        # SR Checkpoint 검증
+        sr_ckpt_path = opt['path'].get('network_sr', None)
+        if sr_ckpt_path and os.path.exists(sr_ckpt_path):
+            sr_ckpt = torch.load(sr_ckpt_path, map_location='cpu')
+            sr_ckpt_key = opt['path'].get('network_sr_key', None)
+            if sr_ckpt_key and sr_ckpt_key in sr_ckpt:
+                sr_ckpt = sr_ckpt[sr_ckpt_key]
+            if sr_first_key in sr_ckpt:
+                self.text_logger.write(f"  Checkpoint denoiser first conv: {sr_ckpt[sr_first_key].shape}")
+            self.text_logger.write(f"  Checkpoint keys: {len(sr_ckpt)} keys")
+        self.text_logger.write("="*60)
+
         self.load_network(self.net_sr, name='network_sr', tag='net_sr')
         self.net_sr = self.model_to_device(self.net_sr, is_trainable=True)
         self.print_network(self.net_sr, tag='net_sr')
@@ -78,6 +111,35 @@ class SR4IRDetectionModel(BaseModel):
         
         # define network detction
         self.net_det = build_network(opt['network_det'], self.text_logger, task=self.task, tag='net_det')
+
+        # ★ 가중치 로드 전 검증
+        self.text_logger.write("="*60)
+        self.text_logger.write("[Weight Verification] BEFORE loading checkpoint:")
+        self.text_logger.write(f"  Detector class: {type(self.get_bare_model(self.net_det)).__name__}")
+        det_state = self.get_bare_model(self.net_det).state_dict()
+        first_conv_key = 'detector.backbone.body.0.0.weight'
+        if first_conv_key in det_state:
+            self.text_logger.write(f"  Model first conv shape: {det_state[first_conv_key].shape}")
+            in_ch = det_state[first_conv_key].shape[1]
+            self.text_logger.write(f"  => Model expects {in_ch}-channel input")
+
+        # Checkpoint 검증
+        ckpt_path = opt['path'].get('network_det', None)
+        if ckpt_path and os.path.exists(ckpt_path):
+            ckpt = torch.load(ckpt_path, map_location='cpu')
+            ckpt_key = opt['path'].get('network_det_key', None)
+            if ckpt_key and ckpt_key in ckpt:
+                ckpt = ckpt[ckpt_key]
+            if first_conv_key in ckpt:
+                self.text_logger.write(f"  Checkpoint first conv shape: {ckpt[first_conv_key].shape}")
+                ckpt_in_ch = ckpt[first_conv_key].shape[1]
+                self.text_logger.write(f"  => Checkpoint has {ckpt_in_ch}-channel input")
+                if in_ch != ckpt_in_ch:
+                    self.text_logger.write(f"  ★★★ MISMATCH! Model={in_ch}ch, Checkpoint={ckpt_in_ch}ch ★★★")
+                else:
+                    self.text_logger.write(f"  ✓ MATCH: Both {in_ch}-channel")
+        self.text_logger.write("="*60)
+
         self.load_network(self.net_det, name='network_det', tag='net_det')
         self.net_det = self.model_to_device(self.net_det, is_trainable=True)
         self.print_network(self.net_det, tag='net_det')
@@ -118,16 +180,23 @@ class SR4IRDetectionModel(BaseModel):
         """
         Forward SR network with support for both single and dual output models.
 
-        For SonarSR: returns (sr_output, denoised_lr)
+        ★ SonarSR: Input/Output 모두 [-1, 1] 범위
+        - Input: apply_sonar_noise에서 [-1, 1]로 변환됨
+        - Output: [-1, 1] → [0, 1]로 변환해서 반환
+
+        For SonarSR: returns (sr_output, denoised_lr) in [0, 1] range
         For SwinIR/others: returns (sr_output, None)
         """
         output = self.net_sr(img_lr_batch)
         if self.use_sonarsr:
-            # SonarSR returns (final_x, denoised_x)
+            # SonarSR returns (final_x, denoised_x) in [-1, 1] range
             img_sr_batch, img_denoised_batch = output
+            # ★ [-1, 1] → [0, 1] 변환 (detector와 loss 계산용)
+            img_sr_batch = (img_sr_batch + 1) / 2
+            img_denoised_batch = (img_denoised_batch + 1) / 2
             return img_sr_batch, img_denoised_batch
         else:
-            # Standard SR models return single output
+            # Standard SR models return single output in [0, 1] range
             return output, None
 
 
@@ -281,6 +350,33 @@ class SR4IRDetectionModel(BaseModel):
         # warmup epoch
         self.warmup_epoch = train_opt.get('warmup_epoch', -1)
         self.text_logger.write("NOTICE: total epoch: {}, warmup epoch: {}".format(train_opt['epoch'], self.warmup_epoch))
+
+        # Log key config to wandb at training start
+        config_summary = {
+            "config/experiment_name": self.opt.get('name', 'unknown'),
+            "config/scale": self.scale,
+            "config/batch_size": train_opt.get('batch_size', 1),
+            "config/accumulation_steps": train_opt.get('accumulation_steps', 1),
+            "config/total_epochs": train_opt.get('epoch', 50),
+            "config/lr_sr": train_opt.get('optim_sr', {}).get('lr', 0),
+            "config/lr_det": train_opt.get('optim_det', {}).get('lr', 0),
+            "config/noise_min_L": train_opt.get('noise_min_L', 0.05),
+            "config/noise_max_L": train_opt.get('noise_max_L', 0.5),
+            "config/network_sr": self.opt.get('network_sr', {}).get('name', 'unknown'),
+            "config/network_det": self.opt.get('network_det', {}).get('name', 'unknown'),
+        }
+        # Loss weights
+        if train_opt.get('pixel_opt'):
+            config_summary["config/loss_weight_pix"] = train_opt['pixel_opt'].get('loss_weight', 1.0)
+        if train_opt.get('pixel_dn_opt'):
+            config_summary["config/loss_weight_pix_dn"] = train_opt['pixel_dn_opt'].get('loss_weight', 0.5)
+        if train_opt.get('tdp_opt'):
+            config_summary["config/loss_weight_tdp"] = train_opt['tdp_opt'].get('loss_weight', 0.5)
+        if train_opt.get('det_sr_opt'):
+            config_summary["config/loss_weight_det_sr"] = train_opt['det_sr_opt'].get('loss_weight', 1.0)
+        if train_opt.get('det_cqmix_opt'):
+            config_summary["config/loss_weight_det_cqmix"] = train_opt['det_cqmix_opt'].get('loss_weight', 1.0)
+        self.wandb_log(config_summary, step=0)
         
     def setup_optimizers(self):
         train_opt = self.opt['train']
@@ -347,7 +443,7 @@ class SR4IRDetectionModel(BaseModel):
             # phase 1;
             # update net_sr, freeze net_cls
             img_sr_batch, img_denoised_batch = self._forward_sr(img_lr_batch)
-            img_sr_batch = self.force_grayscale(img_sr_batch)
+            img_sr_batch = self.force_grayscale(img_sr_batch).clamp(0, 1)  # ★ Detector expects [0,1] range
             save_prob = self.opt['train'].get('sr_save_prob', 0.01)
             save_name = f"train_e{epoch:03d}_iter{current_iter:07d}.png"
             self.maybe_save_sr(img_sr_batch, filename=save_name, prob=save_prob)
@@ -367,7 +463,8 @@ class SR4IRDetectionModel(BaseModel):
             # Denoised LR supervision (SonarSR intermediate output)
             if hasattr(self, 'cri_pix_dn') and img_denoised_batch is not None:
                 # Downsample HR to LR size for GT comparison
-                img_lr_gt = interpolate(img_hr_batch, scale_factor=1/self.scale, mode='bicubic', align_corners=False)
+                # bilinear 사용: degradation pipeline (apply_sonar_noise)과 동일하게 맞춤
+                img_lr_gt = interpolate(img_hr_batch, scale_factor=1/self.scale, mode='bilinear', align_corners=False)
                 l_pix_dn = self.cri_pix_dn(img_denoised_batch, img_lr_gt)
                 metric_logger.meters["l_pix_dn"].update(l_pix_dn.item())
                 self.log_scalar('losses/l_pix_dn', l_pix_dn.item(), current_iter)
@@ -376,8 +473,12 @@ class SR4IRDetectionModel(BaseModel):
             if epoch > self.warmup_epoch:
                 if hasattr(self, 'cri_tdp'):
                     self.net_det.eval()
-                    _, _, feat_sr = self.net_det(img_sr_list, return_feats=True)
-                    _, _, feat_hr = self.net_det(img_hr_list, return_feats=True)
+                    # backbone_only=True: RPN/ROI skip하고 FPN feature만 추출 (VRAM 대폭 절감)
+                    # feat_sr: SR network gradient 전파 필요 → no_grad 불가
+                    _, _, feat_sr = self.net_det(img_sr_list, backbone_only=True)
+                    # feat_hr: HR은 GT라서 gradient 불필요 → no_grad로 추가 절감
+                    with torch.no_grad():
+                        _, _, feat_hr = self.net_det(img_hr_list, backbone_only=True)
                     self.net_det.train()
 
                     # Check if using Multi-Scale Object-Aware TDP Loss
@@ -403,14 +504,16 @@ class SR4IRDetectionModel(BaseModel):
 
             # Only update weights at accumulation boundaries or end of epoch
             if (iter + 1) % accumulation_steps == 0 or (iter + 1) == len(data_loader_train):
+                # ★ SR gradient clipping 추가 (loss 폭발 방지)
+                torch.nn.utils.clip_grad_norm_(self.net_sr.parameters(), max_norm=1.0)
                 self.optimizer_sr.step()
             
             # phase 2;
-            # update network det, freeze net_cls
-            img_sr_batch, img_denoised_batch = self._forward_sr(img_lr_batch)
-            img_sr_batch = img_sr_batch.detach()
-            img_sr_batch = self.force_grayscale(img_sr_batch)
-            img_sr_list = self.batch_to_list(img_sr_batch, img_list=img_hr_list)
+            # update network det, freeze net_sr
+            # Phase 1에서 이미 계산된 img_sr_batch를 detach해서 재사용 (SR forward 제거)
+            # img_sr_batch는 이미 force_grayscale 적용됨 (line 350)
+            img_sr_batch_det = img_sr_batch.detach()
+            img_sr_list = self.batch_to_list(img_sr_batch_det, img_list=img_hr_list)
 
             # Prepare denoised variants if using SonarMix
             img_dn_list = None
@@ -418,10 +521,9 @@ class SR4IRDetectionModel(BaseModel):
             if img_denoised_batch is not None:
                 # SonarSR provides denoised LR output - upscale to HR resolution
                 img_denoised_batch = img_denoised_batch.detach()
-                img_denoised_batch = self.force_grayscale(img_denoised_batch)
+                img_denoised_batch = self.force_grayscale(img_denoised_batch).clamp(0, 1)  # ★ Detector expects [0,1]
                 # Upscale denoised LR to HR size using bicubic interpolation (keep 1-channel)
-                img_dn_batch = interpolate(img_denoised_batch, scale_factor=self.scale, mode='bicubic', align_corners=False)
-                img_dn_list = self.batch_to_list(img_dn_batch, img_list=img_hr_list)
+                img_dn_batch = interpolate(img_denoised_batch, scale_factor=self.scale, mode='bicubic', align_corners=False).clamp(0, 1)
                 # For denoise+SR variant: img_sr_list already is denoise→SR from SonarSR
                 # So we use img_sr_list as dnsr variant
                 img_dnsr_list = img_sr_list
@@ -478,7 +580,8 @@ class SR4IRDetectionModel(BaseModel):
             if hasattr(self, 'cri_det_cqmix'):
                 batch_size = len(img_hr_list)
                 mask = interpolate((torch.randn(batch_size,1,8,8)).bernoulli_(p=0.5), size=(img_hr_batch.shape[2:]), mode='nearest').to(self.device)
-                img_cqmix_batch = img_sr_batch*mask + img_hr_batch*(1-mask)
+                # img_sr_batch_det 사용 (detach된 버전) - SR gradient 누수 방지
+                img_cqmix_batch = img_sr_batch_det*mask + img_hr_batch*(1-mask)
                 img_cqmix_batch = self.force_grayscale(img_cqmix_batch)
                 img_cqmix_list = self.batch_to_list(img_cqmix_batch, img_list=img_hr_list)
                 _, loss_dict_cqmix = self.net_det(img_cqmix_list, target_list)
@@ -512,6 +615,23 @@ class SR4IRDetectionModel(BaseModel):
                     lr_scheduler_d.step()
                 else:
                     self.update_learning_rate()
+
+        # Epoch-end summary logging to wandb
+        epoch_metrics = {
+            "train/epoch": epoch,
+            "train/lr_sr": self.optimizer_sr.param_groups[0]["lr"],
+            "train/lr_det": self.optimizer_det.param_groups[0]["lr"],
+        }
+        # Add average metrics from metric_logger
+        for name, meter in metric_logger.meters.items():
+            if hasattr(meter, 'global_avg'):
+                epoch_metrics[f"train/{name}_avg"] = meter.global_avg
+        # Log noise L range if learnable
+        if self.learnable_noise:
+            min_L, max_L = self.get_noise_L_range()
+            epoch_metrics["train/noise_L_min"] = min_L.item() if torch.is_tensor(min_L) else min_L
+            epoch_metrics["train/noise_L_max"] = max_L.item() if torch.is_tensor(max_L) else max_L
+        self.wandb_log(epoch_metrics, step=current_iter)
         return
             
     @torch.inference_mode()
@@ -539,27 +659,21 @@ class SR4IRDetectionModel(BaseModel):
             img_hr_list = list(img_hr.to(self.device) for img_hr in img_hr_list)
             target_list = [{k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in target_list]
 
-            # Baseline evaluation (epoch 0): Use HR images directly to verify detector works
-            # Training evaluation (epoch > 0): Use SR images from trained SR network
-            if epoch == 0:
-                # Baseline: Evaluate detector on HR images (same as detector training)
-                img_hr_batch = self.list_to_batch(img_hr_list)
-                img_sr_batch = self.force_grayscale(img_hr_batch)
-                img_sr_list = self.batch_to_list(img_sr_batch, img_list=img_hr_list)
-            else:
-                # make on-the-fly LR image
-                img_hr_batch = self.list_to_batch(img_hr_list)
-                min_L, max_L = self.get_noise_L_range()
-                img_lr_batch = apply_sonar_noise(
+            # ★ SR4IR 목표: SR 이미지에서의 detection 성능 향상
+            # 따라서 모든 epoch에서 SR 이미지로 평가 (epoch 0 = baseline SR 성능)
+            # make on-the-fly LR image with noise
+            img_hr_batch = self.list_to_batch(img_hr_list)
+            min_L, max_L = self.get_noise_L_range()
+            img_lr_batch = apply_sonar_noise(
                 img_hr_batch,
                 downsample=self.scale,
                 min_L=min_L, max_L=max_L,
                 use_rsample=self.learnable_noise,
-                )
-                # perform SR
-                img_sr_batch, _ = self._forward_sr(img_lr_batch)
-                img_sr_batch = self.force_grayscale(img_sr_batch)
-                img_sr_list = self.batch_to_list(img_sr_batch, img_list=img_hr_list)
+            )
+            # perform SR
+            img_sr_batch, _ = self._forward_sr(img_lr_batch)
+            img_sr_batch = self.force_grayscale(img_sr_batch).clamp(0, 1)  # ★ Detector expects [0,1] range
+            img_sr_list = self.batch_to_list(img_sr_batch, img_list=img_hr_list)
 
             # object detection
             if torch.cuda.is_available(): torch.cuda.synchronize()
@@ -574,13 +688,12 @@ class SR4IRDetectionModel(BaseModel):
 
             # evaluation on validation batch
             batch_size = len(img_sr_list)
-            # Skip PSNR/LPIPS for epoch 0 baseline (comparing HR to HR gives meaningless results)
-            if epoch > 0:
-                psnr, valid_batch_size = calculate_psnr_batch(quantize(img_sr_batch), img_hr_batch)
-                metric_logger.meters["psnr"].update(psnr.item(), n=valid_batch_size)
-                if self.opt['test'].get('calculate_lpips', False):
-                    lpips, valid_batch_size = calculate_lpips_batch(quantize(img_sr_batch), img_hr_batch, self.net_lpips)
-                    metric_logger.meters["lpips"].update(lpips.item(), n=valid_batch_size)
+            # ★ 모든 epoch에서 SR 이미지 사용하므로 PSNR/LPIPS 계산
+            psnr, valid_batch_size = calculate_psnr_batch(quantize(img_sr_batch), img_hr_batch)
+            metric_logger.meters["psnr"].update(psnr.item(), n=valid_batch_size)
+            if self.opt['test'].get('calculate_lpips', False):
+                lpips, valid_batch_size = calculate_lpips_batch(quantize(img_sr_batch), img_hr_batch, self.net_lpips)
+                metric_logger.meters["lpips"].update(lpips.item(), n=valid_batch_size)
             res = {target["image_id"]: output for target, output in zip(target_list, outputs_sr)}
             coco_evaluator.update(res)
             num_processed_samples += batch_size
@@ -592,28 +705,27 @@ class SR4IRDetectionModel(BaseModel):
         # logging training state
         metric_summary = f"{header}"
         if epoch == 0:
-            metric_summary += " [Baseline: HR images, detector-only evaluation]"
-        else:
-            metric_summary = self.add_metric(metric_summary, 'PSNR', metric_logger.psnr.global_avg, epoch)
-            if self.opt['test'].get('calculate_lpips', False):
-                metric_summary = self.add_metric(metric_summary, 'LPIPS', metric_logger.lpips.global_avg, epoch)
+            metric_summary += " [Baseline: SR images before joint training]"
+        metric_summary = self.add_metric(metric_summary, 'PSNR', metric_logger.psnr.global_avg, epoch)
+        if self.opt['test'].get('calculate_lpips', False):
+            metric_summary = self.add_metric(metric_summary, 'LPIPS', metric_logger.lpips.global_avg, epoch)
         self.text_logger.write(metric_summary)
 
-        if epoch > 0:
-            wandb_step = getattr(self, "current_iter", epoch)
-            val_metrics = {"val/psnr": metric_logger.psnr.global_avg}
+        # ★ 모든 epoch에서 SR 평가하므로 항상 로깅
+        wandb_step = getattr(self, "current_iter", epoch)
+        val_metrics = {"val/psnr": metric_logger.psnr.global_avg}
+        if self.opt['test'].get('calculate_lpips', False):
+            val_metrics["val/lpips"] = metric_logger.lpips.global_avg
+        self.wandb_log(val_metrics, step=wandb_step)
+        if self.is_train and hasattr(self, "tb_logger"):
+            self.tb_logger.add_scalar("val/psnr", metric_logger.psnr.global_avg, epoch)
             if self.opt['test'].get('calculate_lpips', False):
-                val_metrics["val/lpips"] = metric_logger.lpips.global_avg
-            self.wandb_log(val_metrics, step=wandb_step)
-            if self.is_train and hasattr(self, "tb_logger"):
-                self.tb_logger.add_scalar("val/psnr", metric_logger.psnr.global_avg, epoch)
-                if self.opt['test'].get('calculate_lpips', False):
-                    self.tb_logger.add_scalar("val/lpips", metric_logger.lpips.global_avg, epoch)
+                self.tb_logger.add_scalar("val/lpips", metric_logger.lpips.global_avg, epoch)
 
         # accumulate predictions from all images
         coco_evaluator.accumulate()
-        coco_evaluator.summarize(self.text_logger, tag='SR' if epoch > 0 else 'Baseline')
-        wandb_step = getattr(self, "current_iter", epoch) if epoch > 0 else epoch
+        coco_evaluator.summarize(self.text_logger, tag='SR (baseline)' if epoch == 0 else 'SR')
+        wandb_step = getattr(self, "current_iter", epoch)
         current_ap = self._log_coco_metrics(coco_evaluator, epoch, prefix="val/det", step=wandb_step)
 
         # Save best checkpoint based on mAP
@@ -631,6 +743,12 @@ class SR4IRDetectionModel(BaseModel):
                 f"📈 Current mAP: {current_ap:.4f} | Baseline: {self.baseline_ap:.4f} | "
                 f"Improvement: {improvement:+.4f} ({improvement_pct:+.2f}%)"
             )
+            # Log improvement metrics to wandb
+            self.wandb_log({
+                "val/det/baseline_mAP": self.baseline_ap,
+                "val/det/improvement_abs": improvement,
+                "val/det/improvement_pct": improvement_pct,
+            }, step=wandb_step)
 
             if current_ap > self.best_ap:
                 self.best_ap = current_ap
@@ -682,26 +800,42 @@ class SR4IRDetectionModel(BaseModel):
     def resume_training(self, resume_path):
         """Reload networks, optimizers and schedulers for resumed training."""
         import torch
+        self.text_logger.write(f'[Resume] Loading checkpoint from: {resume_path}')
+
+        if not osp.exists(resume_path):
+            raise FileNotFoundError(f'[Resume] Checkpoint not found: {resume_path}')
+
         resume_state = torch.load(resume_path, map_location="cpu")
+        self.text_logger.write(f'[Resume] Checkpoint keys: {list(resume_state.keys())}')
+        self.text_logger.write(f'[Resume] Checkpoint epoch: {resume_state.get("epoch", "N/A")}')
 
         # Load schedulers
         resume_schedulers = resume_state['schedulers']
         assert len(resume_schedulers) == len(self.schedulers), 'Wrong lengths of schedulers'
         for i, s in enumerate(resume_schedulers):
             self.schedulers[i].load_state_dict(s)
+        self.text_logger.write(f'[Resume] Loaded {len(resume_schedulers)} schedulers')
 
         # Load optimizers
         if 'optimizer_sr' in resume_state:
             self.optimizer_sr.load_state_dict(resume_state['optimizer_sr'])
+            self.text_logger.write('[Resume] Loaded optimizer_sr')
         if 'optimizer_det' in resume_state:
             self.optimizer_det.load_state_dict(resume_state['optimizer_det'])
+            self.text_logger.write('[Resume] Loaded optimizer_det')
 
-        # Load networks
+        # Load networks (OVERRIDE pretrained weights with checkpoint weights)
         if 'net_sr' in resume_state:
             self.get_bare_model(self.net_sr).load_state_dict(resume_state['net_sr'], strict=True)
+            self.text_logger.write('[Resume] Loaded net_sr weights from checkpoint (overriding pretrained)')
+        else:
+            self.text_logger.write('[Resume] WARNING: net_sr not found in checkpoint!')
         if 'net_det' in resume_state:
             self.get_bare_model(self.net_det).load_state_dict(resume_state['net_det'], strict=True)
+            self.text_logger.write('[Resume] Loaded net_det weights from checkpoint (overriding pretrained)')
+        else:
+            self.text_logger.write('[Resume] WARNING: net_det not found in checkpoint!')
 
-        self.text_logger.write(f'Resume training from {resume_path}')
+        self.text_logger.write(f'[Resume] SUCCESS - Resume training from {resume_path}')
 
         return resume_state['epoch']

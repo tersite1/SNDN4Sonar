@@ -106,15 +106,16 @@ class BaseModel():
         wandb_opt = self._load_wandb_config()
         if not wandb_opt or wandb_opt.get('disabled', False):
             return
+
+        mode = wandb_opt.get('mode', 'online')
+        if mode:
+            os.environ['WANDB_MODE'] = str(mode)
+
+        # API key 설정 (있으면 사용, 없으면 wandb가 자체 처리 - wandb login 캐시 사용)
         api_key = wandb_opt.get('api_key') or os.environ.get('WANDB_API_KEY')
         if api_key:
             os.environ['WANDB_API_KEY'] = api_key
-        else:
-            self.text_logger.write('W&B api_key not provided; skipping W&B init.')
-            return
-        mode = wandb_opt.get('mode')
-        if mode:
-            os.environ['WANDB_MODE'] = str(mode)
+
         try:
             import wandb
         except Exception as exc:

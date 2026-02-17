@@ -28,6 +28,7 @@ if str(FILE_DIR) not in sys.path:
     sys.path.append(str(FILE_DIR))
 
 from fasterrcnn_mbv3 import SonarFasterRCNNDetector
+from src.archs.det.sonarfasterrcnndetector_arch import SonarFasterRCNNDetector1ch
 
 
 def load_txt_labels(path: Path) -> List[Dict]:
@@ -246,6 +247,7 @@ def parse_args():
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--save_dir", type=Path, default=Path("runs_det_gray1ch"))
+    parser.add_argument("--pure_1ch", action="store_true", help="Use pure 1-channel detector (no 3ch repeat)")
     return parser.parse_args(filtered_args)
 
 
@@ -282,15 +284,33 @@ def main():
         loader = DataLoader(ds, batch_size=args.batch, shuffle=True, num_workers=args.workers, collate_fn=collate_fn)
 
     num_classes = 3  # Class 0: background, Class 1: cylinder, Class 2: manta
-    model = SonarFasterRCNNDetector(
-        num_classes=num_classes,
-        min_size=640,
-        max_size=640,
-        box_score_thresh=0.001,
-        box_detections_per_img=1000,
-        rpn_pre_nms_top_n_test=5000,
-        rpn_post_nms_top_n_test=5000,
-    ).to(device)
+
+    if args.pure_1ch:
+        # ★ 순수 1채널 detector (repeat 변환 없음, pretrained 없음)
+        if rank == 0:
+            print("★ Using pure 1-channel detector (SonarFasterRCNNDetector1ch)")
+        model = SonarFasterRCNNDetector1ch(
+            num_classes=num_classes,
+            min_size=640,
+            max_size=640,
+            box_score_thresh=0.001,
+            box_detections_per_img=1000,
+            rpn_pre_nms_top_n_test=5000,
+            rpn_post_nms_top_n_test=5000,
+            image_mean=(0.449,),  # ImageNet grayscale mean
+            image_std=(0.226,),   # ImageNet grayscale std
+        ).to(device)
+    else:
+        # 기존 방식 (1ch → 3ch repeat, ImageNet pretrained 사용 가능)
+        model = SonarFasterRCNNDetector(
+            num_classes=num_classes,
+            min_size=640,
+            max_size=640,
+            box_score_thresh=0.001,
+            box_detections_per_img=1000,
+            rpn_pre_nms_top_n_test=5000,
+            rpn_post_nms_top_n_test=5000,
+        ).to(device)
 
     if is_distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)

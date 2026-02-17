@@ -1,7 +1,12 @@
 # large memory files
-experiments
-tb_loggers
-datasets
+experiments/
+tb_loggers/
+datasets/
+SAR/
+runs_det*/
+*.pth
+*.rar
+*.tar.gz
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

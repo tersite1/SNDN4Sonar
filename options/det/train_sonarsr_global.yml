@@ -1,17 +1,19 @@
 # ------------------------------------------------------------------------
-# General Settings - A100 x 2 GPU Configuration
+# SonarSR Global Attention Version (sr_arch_pixelshuffle_globalo_v2)
+# - Slower training (global attention: 80x80 = 6400 tokens)
+# - Better quality (full receptive field)
 # ------------------------------------------------------------------------
-name: noisewow
+name: sonarsr_global
 model_type: sr4ir_det
 
 # WandB Logging
 wandb:
   project: SR4IR
-  run_name: noisewow
+  run_name: sonarsr_global
   mode: online
 
-scale: 8                    # ★ SonarSR 원본 가중치와 동일 (8배)
-num_gpu: 2                  # A100 2대
+scale: 8
+num_gpu: 2
 manual_seed: 123412
 num_threads: 16
 print_freq: 100
@@ -31,7 +33,7 @@ data:
   label_offset: 1
 
 # ------------------------------------------------------------------------
-# Network Settings
+# Network Settings - Global Attention
 # ------------------------------------------------------------------------
 network_sr:
   name: sonarsr
@@ -39,17 +41,23 @@ network_sr:
   in_channels: 1
   base_channels: 64
   num_residual_blocks: 8
+  # ★ Global Attention 설정
+  denoiser_attn_type: global
+  sr_attn_type: none
+  denoiser_global_residual: true
+  sr_upsample_type: pixelshuffle
+  sr_use_bicubic_residual: true
 
 network_det:
   name: SonarFasterRCNNDetector
-  use_1ch: true                  # ★ 순수 1채널 detector
+  use_1ch: true
   backbone_variant: large
   num_classes: 3
   image_mean: [0.449]
   image_std: [0.226]
 
 # ------------------------------------------------------------------------
-# Path Settings (Original Pretrained)
+# Path Settings - sr_arch_pixelshuffle_globalo_v2 checkpoint
 # ------------------------------------------------------------------------
 path:
   network_sr: /mnt/server16_hard0/kangwook/LIGNex1/SonarSR/checkpoints/sr_arch_pixelshuffle_globalo_v2/model_step_100000.pth
@@ -58,11 +66,11 @@ path:
   network_det: /mnt/server16_hard1/LIGNEX1/SR4IR/runs_det_pure1ch_pretrained/best_map.pth
 
 # ------------------------------------------------------------------------
-# Training Settings - A100 Optimized
+# Training Settings
 # ------------------------------------------------------------------------
 train:
-  batch_size: 4             # Per GPU batch size
-  accumulation_steps: 2     # Effective batch = 4 * 2 * 2 = 16
+  batch_size: 4
+  accumulation_steps: 2
   epoch: 50
   save_freq: 5
   sr_save_prob: 0.001
@@ -92,7 +100,7 @@ train:
     T_max: 50
     eta_min: 0
 
-  # ★ Phase 1 Loss (SR 학습용)
+  # Phase 1 Loss (SR)
   pixel_opt:
     type: L1Loss
     loss_weight: !!float 1.0
@@ -113,7 +121,7 @@ train:
     background_weight: !!float 1.0
     spatial_sigma: !!float 1.5
 
-  # ★ Phase 2 Loss (디텍터 적응용)
+  # Phase 2 Loss (Detector)
   det_hr_opt:
     type: DETLoss
     loss_weight: !!float 1.0

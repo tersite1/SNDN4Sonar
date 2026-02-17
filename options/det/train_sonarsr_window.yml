@@ -1,19 +1,20 @@
 # ------------------------------------------------------------------------
-# General Settings - A100 x 2 GPU Configuration
+# SonarSR Window Attention Version (windowattn_BLresidual)
+# - Faster training (window attention: 8x8 = 64 tokens vs global: 6400 tokens)
 # ------------------------------------------------------------------------
-name: noisewow
+name: sonarsr_window_wowbatch
 model_type: sr4ir_det
 
 # WandB Logging
 wandb:
   project: SR4IR
-  run_name: noisewow
+  run_name: sonarsr_window_wowbatch
   mode: online
 
-scale: 8                    # ★ SonarSR 원본 가중치와 동일 (8배)
-num_gpu: 2                  # A100 2대
+scale: 8
+num_gpu: 2
 manual_seed: 123412
-num_threads: 16
+num_threads: 4
 print_freq: 100
 dist_url: env://
 find_unused_parameters: true
@@ -29,9 +30,10 @@ data:
   yolo_normalized: true
   merge_classes: false
   label_offset: 1
+  eval_focus_only: true  # ★ 평가만 focus (학습은 전체)
 
 # ------------------------------------------------------------------------
-# Network Settings
+# Network Settings - Window Attention
 # ------------------------------------------------------------------------
 network_sr:
   name: sonarsr
@@ -39,30 +41,37 @@ network_sr:
   in_channels: 1
   base_channels: 64
   num_residual_blocks: 8
+  # ★ Window Attention 설정
+  denoiser_attn_type: window
+  sr_attn_type: none
+  denoiser_global_residual: true
+  sr_upsample_type: pixelshuffle
+  sr_use_bicubic_residual: true
 
 network_det:
   name: SonarFasterRCNNDetector
-  use_1ch: true                  # ★ 순수 1채널 detector
+  use_1ch: true
   backbone_variant: large
   num_classes: 3
   image_mean: [0.449]
   image_std: [0.226]
 
 # ------------------------------------------------------------------------
-# Path Settings (Original Pretrained)
+# Path Settings - windowattn_BLresidual checkpoint
+# 원본 config: /mnt/server16_hard0/kangwook/LIGNex1/SonarSR/config/test/test_sonar_windowattn.yaml
 # ------------------------------------------------------------------------
 path:
-  network_sr: /mnt/server16_hard0/kangwook/LIGNex1/SonarSR/checkpoints/sr_arch_pixelshuffle_globalo_v2/model_step_100000.pth
+  network_sr: /mnt/server16_hard0/kangwook/LIGNex1/SonarSR/checkpoints/windowattn_BLresidual/model_step_100000.pth
   network_sr_key: generator_state_dict
   strict_load: false
   network_det: /mnt/server16_hard1/LIGNEX1/SR4IR/runs_det_pure1ch_pretrained/best_map.pth
 
 # ------------------------------------------------------------------------
-# Training Settings - A100 Optimized
+# Training Settings
 # ------------------------------------------------------------------------
 train:
-  batch_size: 4             # Per GPU batch size
-  accumulation_steps: 2     # Effective batch = 4 * 2 * 2 = 16
+  batch_size: 24
+  accumulation_steps: 4
   epoch: 50
   save_freq: 5
   sr_save_prob: 0.001
@@ -92,7 +101,7 @@ train:
     T_max: 50
     eta_min: 0
 
-  # ★ Phase 1 Loss (SR 학습용)
+  # Phase 1 Loss (SR)
   pixel_opt:
     type: L1Loss
     loss_weight: !!float 1.0
@@ -113,7 +122,7 @@ train:
     background_weight: !!float 1.0
     spatial_sigma: !!float 1.5
 
-  # ★ Phase 2 Loss (디텍터 적응용)
+  # Phase 2 Loss (Detector)
   det_hr_opt:
     type: DETLoss
     loss_weight: !!float 1.0
@@ -129,7 +138,7 @@ train:
   det_loss_clip: 2.0
   det_grad_clip: 0.5
   learnable_noise: false
-  noise_min_L: 0.05
+  noise_min_L: 0.2
   noise_max_L: 0.5
 
 test:

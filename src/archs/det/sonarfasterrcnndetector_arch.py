@@ -139,12 +139,14 @@ class SonarFasterRCNNDetector(nn.Module):
         images: List[Tensor],
         targets: Optional[List[Dict[str, Tensor]]] = None,
         return_feats: bool = False,
+        backbone_only: bool = False,
     ):
         """
         Args:
             images: List[[C,H,W]], float32, 0~1 (C=1 or 3; 1채널이면 내부에서 3채널로 변환)
             targets: 학습 시 GT dict 리스트
             return_feats: True면 feat_dict도 반환
+            backbone_only: True면 backbone/FPN만 실행하고 RPN/ROI skip (TDP loss용, VRAM 절감)
         """
         # Convert 1-channel to 3-channel (MobileNetV3 expects 3-channel RGB)
         images = [img.repeat(3, 1, 1) if img.size(0) == 1 else img for img in images]
@@ -158,6 +160,15 @@ class SonarFasterRCNNDetector(nn.Module):
             features_for_heads = {"0": features}
         else:
             features_for_heads = features
+
+        # backbone_only: RPN/ROI skip하고 feature만 반환 (TDP loss용)
+        if backbone_only:
+            if self.tdp_level is not None and self.tdp_level in features_for_heads:
+                feat_out = {"0": features_for_heads[self.tdp_level]}
+            else:
+                feat_out = features_for_heads
+            feat_dict = {"features": feat_out}
+            return None, {}, feat_dict
 
         proposals, proposal_losses = self.detector.rpn(images_list, features_for_heads, targets)
 
@@ -209,5 +220,219 @@ class SonarFasterRCNNDetector(nn.Module):
         return detections, losses
 
 
+class SonarFasterRCNNDetector1ch(nn.Module):
+    """
+    1채널 전용 Faster R-CNN detector.
+    MobileNetV3 백본의 첫 conv를 1채널로 수정하여 repeat 변환 없이 동작.
+
+    ★ Transfer Learning: ImageNet pretrained 로드 후 첫 conv만 3ch→1ch 변환
+    - 첫 conv weights: RGB 3채널을 평균내서 grayscale용 1채널로 초기화
+    - 나머지 layers: ImageNet pretrained 100% 활용 (feature map 처리는 채널 수 무관)
+    """
+
+    def __init__(
+        self,
+        num_classes: int = 2,
+        backbone_variant: str = "large",
+        trainable_backbone_layers: int = 6,
+        freeze_backbone: bool = False,
+        fpn: bool = True,
+        image_mean: Tuple[float, ...] = (0.449,),  # ImageNet grayscale mean (Luma weighted)
+        image_std: Tuple[float, ...] = (0.226,),   # ImageNet grayscale std
+        min_size: int = 640,
+        max_size: int = 640,
+        anchor_sizes: Optional[Iterable[Tuple[int, ...]]] = None,
+        aspect_ratios: Optional[Iterable[Tuple[float, ...]]] = None,
+        rpn_pre_nms_top_n_train: int = 2000,
+        rpn_pre_nms_top_n_test: int = 5000,
+        rpn_post_nms_top_n_train: int = 2000,
+        rpn_post_nms_top_n_test: int = 5000,
+        rpn_nms_thresh: float = 0.7,
+        box_score_thresh: float = 0.001,
+        box_nms_thresh: float = 0.5,
+        box_detections_per_img: int = 1000,
+        tdp_level: Optional[str] = None,
+        rpn_only: bool = False,
+    ) -> None:
+        super().__init__()
+
+        # ★ ImageNet pretrained 로드 후 첫 conv만 1채널로 변환
+        backbone_name = "mobilenet_v3_small" if backbone_variant.lower() == "small" else "mobilenet_v3_large"
+        backbone = mobilenet_backbone(
+            backbone_name,
+            weights="DEFAULT",  # ★ ImageNet pretrained 사용
+            trainable_layers=trainable_backbone_layers,
+            fpn=fpn,
+        )
+
+        # ★ 첫 conv layer를 1채널로 변환 (3채널 weights 평균으로 초기화)
+        # MobileNetV3 구조: backbone.body["0"][0] = Conv2d(3, 16, ...)
+        first_conv = backbone.body["0"][0]
+        new_conv = nn.Conv2d(
+            1,  # ★ 1채널 입력
+            first_conv.out_channels,
+            kernel_size=first_conv.kernel_size,
+            stride=first_conv.stride,
+            padding=first_conv.padding,
+            bias=first_conv.bias is not None,
+        )
+        # ★ 3채널 weights를 평균내서 1채널로 초기화 (pretrained 활용)
+        with torch.no_grad():
+            new_conv.weight.data = first_conv.weight.data.mean(dim=1, keepdim=True)
+            if first_conv.bias is not None:
+                new_conv.bias.data = first_conv.bias.data
+        backbone.body["0"][0] = new_conv
+
+        if freeze_backbone:
+            for p in backbone.parameters():
+                p.requires_grad = False
+
+        # Feature map 크기 확인 (1채널로)
+        with torch.no_grad():
+            dummy = torch.zeros(1, 1, min_size, min_size)  # ★ 1채널
+            feat_out = backbone(dummy)
+        if isinstance(feat_out, dict):
+            featmap_names = list(feat_out.keys())
+        else:
+            featmap_names = ["0"]
+        num_levels = len(featmap_names)
+
+        base_sizes = [(8,), (16,), (32,), (64, 128)]
+        if anchor_sizes is None:
+            sizes_norm = []
+            for i in range(num_levels):
+                if i < len(base_sizes):
+                    sizes_norm.append(base_sizes[i])
+                else:
+                    sizes_norm.append(base_sizes[-1])
+            anchor_sizes = tuple(sizes_norm)
+        else:
+            sizes_list = list(anchor_sizes)
+            if len(sizes_list) < num_levels:
+                sizes_list += [sizes_list[-1]] * (num_levels - len(sizes_list))
+            anchor_sizes = tuple(sizes_list[:num_levels])
+
+        if aspect_ratios is None:
+            aspect_ratios = ((0.5, 1.0, 2.0),) * num_levels
+        else:
+            ratios_list = list(aspect_ratios)
+            if len(ratios_list) < num_levels:
+                ratios_list += [ratios_list[-1]] * (num_levels - len(ratios_list))
+            aspect_ratios = tuple(ratios_list[:num_levels])
+
+        anchor_generator = AnchorGenerator(
+            sizes=tuple(anchor_sizes),
+            aspect_ratios=tuple(aspect_ratios),
+        )
+
+        roi_pooler = MultiScaleRoIAlign(
+            featmap_names=featmap_names if fpn else ["0"],
+            output_size=7,
+            sampling_ratio=2,
+        )
+
+        self.detector = FasterRCNN(
+            backbone=backbone,
+            num_classes=num_classes,
+            rpn_anchor_generator=anchor_generator,
+            box_roi_pool=roi_pooler,
+            min_size=min_size,
+            max_size=max_size,
+            image_mean=list(image_mean),
+            image_std=list(image_std),
+            rpn_pre_nms_top_n_train=rpn_pre_nms_top_n_train,
+            rpn_pre_nms_top_n_test=rpn_pre_nms_top_n_test,
+            rpn_post_nms_top_n_train=rpn_post_nms_top_n_train,
+            rpn_post_nms_top_n_test=rpn_post_nms_top_n_test,
+            rpn_nms_thresh=rpn_nms_thresh,
+            box_score_thresh=box_score_thresh,
+            box_nms_thresh=box_nms_thresh,
+            box_detections_per_img=box_detections_per_img,
+        )
+        self.tdp_level = tdp_level
+        self.rpn_only = rpn_only
+
+    def forward(
+        self,
+        images: List[Tensor],
+        targets: Optional[List[Dict[str, Tensor]]] = None,
+        return_feats: bool = False,
+        backbone_only: bool = False,
+    ):
+        """
+        Args:
+            images: List[[1,H,W]], float32, 0~1 (★ 1채널 전용, 변환 없음)
+            targets: 학습 시 GT dict 리스트
+            return_feats: True면 feat_dict도 반환
+            backbone_only: True면 backbone/FPN만 실행하고 RPN/ROI skip (TDP loss용)
+        """
+        # ★ 1채널 전용: repeat 변환 없음!
+        original_image_sizes = [img.shape[-2:] for img in images]
+        images_list: ImageList
+        images_list, targets = self.detector.transform(images, targets)
+
+        features = self.detector.backbone(images_list.tensors)
+        if isinstance(features, torch.Tensor):
+            features_for_heads = {"0": features}
+        else:
+            features_for_heads = features
+
+        if backbone_only:
+            if self.tdp_level is not None and self.tdp_level in features_for_heads:
+                feat_out = {"0": features_for_heads[self.tdp_level]}
+            else:
+                feat_out = features_for_heads
+            feat_dict = {"features": feat_out}
+            return None, {}, feat_dict
+
+        proposals, proposal_losses = self.detector.rpn(images_list, features_for_heads, targets)
+
+        if self.rpn_only:
+            detections = []
+            for props in proposals:
+                if props.numel() == 0:
+                    detections.append({
+                        "boxes": torch.empty((0, 4), device=props.device),
+                        "scores": torch.empty((0,), device=props.device),
+                        "labels": torch.empty((0,), dtype=torch.long, device=props.device),
+                    })
+                    continue
+                scores = torch.linspace(1.0, 0.0, steps=props.shape[0], device=props.device)
+                labels = torch.ones((props.shape[0],), dtype=torch.long, device=props.device)
+                detections.append({"boxes": props, "scores": scores, "labels": labels})
+            detector_losses = {}
+        else:
+            detections, detector_losses = self.detector.roi_heads(
+                features_for_heads, proposals, images_list.image_sizes, targets
+            )
+            detections = self.detector.transform.postprocess(
+                detections, images_list.image_sizes, original_image_sizes
+            )
+
+        if return_feats:
+            if self.tdp_level is not None and self.tdp_level in features_for_heads:
+                feat_out = {"0": features_for_heads[self.tdp_level]}
+            else:
+                feat_out = features_for_heads
+            feat_dict = {"features": feat_out}
+        else:
+            feat_dict = None
+
+        losses: Dict[str, Tensor] = {}
+        if self.training and targets is not None:
+            losses.update(detector_losses)
+            losses.update(proposal_losses)
+        else:
+            losses = {}
+
+        if return_feats:
+            return detections, losses, feat_dict
+        return detections, losses
+
+
 def build_network(**kwargs) -> nn.Module:
+    # 1채널 전용 detector 사용 여부 확인
+    use_1ch = kwargs.pop('use_1ch', False)
+    if use_1ch:
+        return SonarFasterRCNNDetector1ch(**kwargs)
     return SonarFasterRCNNDetector(**kwargs)

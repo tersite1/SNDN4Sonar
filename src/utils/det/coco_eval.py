@@ -59,17 +59,42 @@ class CocoEvaluator:
     def summarize(self, text_logger=None, tag='HR'):
         if text_logger is not None:
             text_logger.write(f"Image type: {tag}")
-            
+
         for iou_type, coco_eval in self.coco_eval.items():
+            # 먼저 summarize 호출하여 stats 생성
+            f = io.StringIO()
+            with contextlib.redirect_stdout(f):
+                coco_eval.summarize()
+
+            stats = coco_eval.stats
+            if stats is None or len(stats) < 6:
+                if text_logger is not None:
+                    text_logger.write(f"IoU metric: {iou_type}")
+                    text_logger.write("No valid detections or stats unavailable")
+                else:
+                    print(f"IoU metric: {iou_type}")
+                    print("No valid detections or stats unavailable")
+                continue
+
+            iouThrs = coco_eval.params.iouThrs
+            iou_str = f"{iouThrs[0]:.2f}:{iouThrs[-1]:.2f}" if len(iouThrs) > 1 else f"{iouThrs[0]:.2f}"
+
+            # AP만 출력 (AR 제외)
+            ap_lines = [
+                f" Average Precision  (AP) @[ IoU={iou_str} | area=   all | maxDets=100 ] = {stats[0]:.3f}",
+                f" Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = {stats[1]:.3f}",
+                f" Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = {stats[2]:.3f}",
+                f" Average Precision  (AP) @[ IoU={iou_str} | area= small | maxDets=100 ] = {stats[3]:.3f}",
+                f" Average Precision  (AP) @[ IoU={iou_str} | area=medium | maxDets=100 ] = {stats[4]:.3f}",
+                f" Average Precision  (AP) @[ IoU={iou_str} | area= large | maxDets=100 ] = {stats[5]:.3f}",
+            ]
+
             if text_logger is not None:
                 text_logger.write(f"IoU metric: {iou_type}")
-                f = io.StringIO()
-                with contextlib.redirect_stdout(f):
-                    coco_eval.summarize()
-                text_logger.write(f.getvalue())
+                text_logger.write("\n".join(ap_lines))
             else:
                 print(f"IoU metric: {iou_type}")
-                coco_eval.summarize()
+                print("\n".join(ap_lines))
             
     def prepare(self, predictions, iou_type):
         if iou_type == "bbox":
